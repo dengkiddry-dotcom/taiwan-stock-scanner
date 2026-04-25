@@ -1,29 +1,35 @@
 name: Auto Scan Stock
+
 on:
   schedule:
-    - cron: '0 10 * * *'
-  workflow_dispatch:
+    - cron: '0 10 * * *'  # 每天台灣時間 18:00 自動執行
+  workflow_dispatch:       # 可手動觸發
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
+
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install yfinance pandas requests lxml html5lib numpy==1.26.4
+
       - name: Run Scan
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python main.py
+
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./
+          publish_dir: ./        # 把根目錄（含 index.html + charts/）一起推
           publish_branch: gh-pages
