@@ -2,8 +2,11 @@ import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta
 import time
+import os
+import json
 
 
+# ── 股票清單 ────────────────────────────────────────────────
 def get_list():
     tw = [
         "1101","1102","1216","1301","1303","1402","1503","1504","1513","1514",
@@ -39,46 +42,258 @@ def get_list():
     return [f"{c}.TW" for c in tw] + [f"{c}.TWO" for c in two]
 
 
-def scan():
+# ── 產生 K 線圖 HTML（純 JS Canvas，零依賴）────────────────
+def generate_chart_html(symbol: str, df: pd.DataFrame, limit_days: list) -> str:
+    code   = symbol.split('.')[0]
+    market = "上市" if symbol.endswith(".TW") else "上櫃"
+
+    records = []
+    limit_set = {d.strftime('%Y-%m-%d') for d in limit_days}
+    for idx, row in df.iterrows():
+        records.append({
+            "date":   idx.strftime('%m/%d'),
+            "open":   round(float(row['Open']),  2),
+            "high":   round(float(row['High']),  2),
+            "low":    round(float(row['Low']),   2),
+            "close":  round(float(row['Close']), 2),
+            "volume": int(row['Volume']),
+            "limit":  idx.strftime('%Y-%m-%d') in limit_set,
+        })
+
+    data_json   = json.dumps(records, ensure_ascii=False)
+    last_close  = records[-1]['close'] if records else 0
+    limit_count = len(limit_days)
+
+    return f"""<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{code} K 線圖</title>
+<style>
+  :root {{
+    --bg:#0d1117; --panel:#161b22; --border:#30363d;
+    --text:#e6edf3; --muted:#8b949e;
+    --up:#26a641; --down:#f85149; --limit:#ffa500; --accent:#58a6ff;
+  }}
+  *{{ box-sizing:border-box; margin:0; padding:0; }}
+  body{{ background:var(--bg); color:var(--text);
+         font-family:'SF Mono','Fira Code',monospace; padding:24px; }}
+  .header{{ display:flex; align-items:baseline; gap:14px; margin-bottom:18px; }}
+  .code{{ font-size:2rem; font-weight:700; color:var(--accent); }}
+  .tag{{ font-size:.8rem; background:var(--panel); border:1px solid var(--border);
+          border-radius:4px; padding:3px 9px; color:var(--muted); }}
+  .stats{{ display:flex; gap:28px; background:var(--panel); border:1px solid var(--border);
+           border-radius:8px; padding:14px 20px; margin-bottom:18px; }}
+  .s-label{{ font-size:.68rem; color:var(--muted); text-transform:uppercase;
+              letter-spacing:.06em; margin-bottom:4px; }}
+  .s-val{{ font-size:1.1rem; font-weight:600; }}
+  .badge{{ background:var(--limit); color:#000; font-weight:700;
+           padding:2px 10px; border-radius:4px; font-size:.85rem; }}
+  .wrap{{ background:var(--panel); border:1px solid var(--border);
+          border-radius:8px; padding:14px; margin-bottom:12px; position:relative; }}
+  canvas{{ display:block; width:100%; cursor:crosshair; }}
+  #tip{{ position:absolute; background:#1c2128; border:1px solid var(--border);
+         border-radius:6px; padding:10px 14px; font-size:.78rem; pointer-events:none;
+         display:none; z-index:10; line-height:1.9; min-width:130px; }}
+  .legend{{ display:flex; gap:18px; font-size:.72rem; color:var(--muted); margin-top:8px; }}
+  .dot{{ display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; }}
+  .vol-title{{ font-size:.68rem; color:var(--muted); text-transform:uppercase;
+               letter-spacing:.06em; margin-bottom:8px; }}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="code">📊 {code}</div>
+  <div class="tag">{market}</div>
+</div>
+
+<div class="stats">
+  <div>
+    <div class="s-label">最新收盤</div>
+    <div class="s-val" style="color:var(--accent)">{last_close}</div>
+  </div>
+  <div>
+    <div class="s-label">漲停次數</div>
+    <div class="s-val"><span class="badge">🔥 {limit_count} 次</span></div>
+  </div>
+  <div>
+    <div class="s-label">資料區間</div>
+    <div class="s-val" style="color:var(--muted);font-size:.88rem">近 30 天</div>
+  </div>
+</div>
+
+<div class="wrap">
+  <canvas id="kc"></canvas>
+  <div id="tip"></div>
+</div>
+<div class="legend">
+  <span><span class="dot" style="background:var(--up)"></span>上漲</span>
+  <span><span class="dot" style="background:var(--down)"></span>下跌</span>
+  <span><span class="dot" style="background:var(--limit)"></span>漲停</span>
+</div>
+
+<div class="wrap" style="padding:12px 14px; margin-top:12px;">
+  <div class="vol-title">成交量</div>
+  <canvas id="vc"></canvas>
+</div>
+
+<script>
+const DATA = {data_json};
+const DPR  = window.devicePixelRatio || 1;
+
+function setup(canvas, h) {{
+  const w = canvas.parentElement.clientWidth - 28;
+  canvas.style.width  = w + 'px';
+  canvas.style.height = h + 'px';
+  canvas.width  = w * DPR;
+  canvas.height = h * DPR;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(DPR, DPR);
+  return {{ ctx, w, h }};
+}}
+
+function draw() {{
+  const kcan = document.getElementById('kc');
+  const vcan = document.getElementById('vc');
+  const tip  = document.getElementById('tip');
+  const {{ ctx:kc, w, h:kh }} = setup(kcan, 340);
+  const {{ ctx:vc, w:vw, h:vh }} = setup(vcan, 80);
+
+  const n=DATA.length, PL=10, PR=52, PT=20, PB=30;
+  const cw=w-PL-PR, ch=kh-PT-PB;
+  const gap=cw/n, bw=Math.max(2,gap-3);
+
+  const UP='#26a641', DN='#f85149', LM='#ffa500', MU='#8b949e', GR='#21262d';
+
+  const pMin = Math.min(...DATA.map(d=>d.low))  * 0.995;
+  const pMax = Math.max(...DATA.map(d=>d.high)) * 1.005;
+  const pr   = pMax-pMin;
+  const py   = v => PT + ch - ((v-pMin)/pr)*ch;
+
+  // grid
+  kc.lineWidth=1;
+  for(let i=0;i<=5;i++){{
+    const p=pMin+(pr/5)*i, y=py(p);
+    kc.strokeStyle=GR; kc.beginPath(); kc.moveTo(PL,y); kc.lineTo(w-PR,y); kc.stroke();
+    kc.fillStyle=MU; kc.font='10px SF Mono,monospace'; kc.textAlign='left';
+    kc.fillText(p.toFixed(1), w-PR+4, y+4);
+  }}
+
+  // date labels
+  const step=Math.max(1,Math.floor(n/6));
+  DATA.forEach((d,i)=>{{
+    if(i%step!==0) return;
+    const x=PL+i*gap+gap/2;
+    kc.fillStyle=MU; kc.font='10px SF Mono,monospace'; kc.textAlign='center';
+    kc.fillText(d.date, x, kh-6);
+  }});
+
+  // candles
+  DATA.forEach((d,i)=>{{
+    const x=PL+i*gap+gap/2;
+    const col=d.limit?LM:(d.close>=d.open?UP:DN);
+    kc.strokeStyle=col; kc.lineWidth=1;
+    kc.beginPath(); kc.moveTo(x,py(d.high)); kc.lineTo(x,py(d.low)); kc.stroke();
+    const y1=py(Math.max(d.open,d.close)), y2=py(Math.min(d.open,d.close));
+    kc.fillStyle=col; kc.fillRect(x-bw/2, y1, bw, Math.max(1,y2-y1));
+    if(d.limit){{
+      kc.fillStyle=LM; kc.font='bold 11px sans-serif'; kc.textAlign='center';
+      kc.fillText('🔥', x, py(d.high)-6);
+    }}
+  }});
+
+  // volume
+  const volMax=Math.max(...DATA.map(d=>d.volume));
+  DATA.forEach((d,i)=>{{
+    const x=PL+i*gap+gap/2;
+    const col=d.limit?LM:(d.close>=d.open?UP:DN);
+    const bh=(d.volume/volMax)*(vh-10);
+    vc.fillStyle=col+'aa';
+    vc.fillRect(x-bw/2, vh-bh, bw, bh);
+  }});
+
+  // tooltip
+  kcan.onmousemove=e=>{{
+    const r=kcan.getBoundingClientRect();
+    const i=Math.round((e.clientX-r.left-PL)/gap-0.5);
+    if(i<0||i>=n){{ tip.style.display='none'; return; }}
+    const d=DATA[i];
+    const col=d.limit?'#ffa500':(d.close>=d.open?'#26a641':'#f85149');
+    const chg=((d.close-d.open)/d.open*100).toFixed(2);
+    tip.innerHTML=`<div style="color:#8b949e;margin-bottom:4px">${{d.date}}</div>
+      <div>開 <b>${{d.open}}</b></div>
+      <div>高 <b>${{d.high}}</b></div>
+      <div>低 <b>${{d.low}}</b></div>
+      <div>收 <b style="color:${{col}}">${{d.close}}</b> (${{chg>0?'+':''}}${{chg}}%)</div>
+      <div>量 <b>${{(d.volume/1000).toFixed(0)}}K</b></div>
+      ${{d.limit?'<div style="color:#ffa500;font-weight:700;margin-top:4px">🔥 漲停</div>':''}}`;
+    tip.style.display='block';
+    const tx=e.clientX-r.left+14;
+    tip.style.left=(tx+130>w ? tx-150 : tx)+'px';
+    tip.style.top='24px';
+  }};
+  kcan.onmouseleave=()=>tip.style.display='none';
+}}
+
+draw();
+window.addEventListener('resize', draw);
+</script>
+</body>
+</html>"""
+
+
+# ── 掃描主函式 ───────────────────────────────────────────────
+def scan(output_dir="charts"):
+    os.makedirs(output_dir, exist_ok=True)
     stocks = get_list()
-    end = datetime.now()
-    start = end - timedelta(days=30)
+    end    = datetime.now()
+    start  = end - timedelta(days=30)
     results = []
-    total = len(stocks)
+    total   = len(stocks)
 
     for i, s in enumerate(stocks):
         try:
-            # 每 20 支休息一次，避免被限流
             if i % 20 == 0 and i > 0:
                 print(f"[進度] {i}/{total}，暫停 3 秒...")
                 time.sleep(3)
 
             df = yf.download(s, start=start, end=end, progress=False)
-
             if df.empty or len(df) < 2:
                 continue
 
-            # squeeze() 自動處理 MultiIndex 或單欄 DataFrame → Series
-            close = df['Close'].squeeze()
+            # 處理新版 yfinance MultiIndex
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
 
+            close = df['Close'].squeeze()
             if not isinstance(close, pd.Series):
                 continue
 
-            pct = close.pct_change()
-            # 台股漲停約 +10%，設 9.8% 容差捕捉漲停
+            pct  = close.pct_change()
             days = pct[pct >= 0.098].index
 
             if not days.empty:
-                dates = [d.strftime('%m/%d') for d in days]
-                code = s.split('.')[0]
+                code   = s.split('.')[0]
                 market = "上市" if s.endswith(".TW") else "上櫃"
-                link = f"https://tw.stock.yahoo.com/quote/{code}/chart"
+
+                # 產生 K 線圖 HTML
+                chart_file = os.path.join(output_dir, f"{code}.html")
+                with open(chart_file, "w", encoding="utf-8") as f:
+                    f.write(generate_chart_html(s, df, list(days)))
+
+                dates = [d.strftime('%m/%d') for d in days]
                 results.append({
-                    "代碼": f"<a href='{link}' target='_blank' style='color:#1a73e8;font-weight:bold;'>{code} 📈</a>",
-                    "市場": market,
+                    "代碼": (
+                        f"<a href='{chart_file}' target='_blank' "
+                        f"style='color:#58a6ff;font-weight:700;text-decoration:none'>"
+                        f"{code} 📊</a>"
+                    ),
+                    "市場":   market,
                     "漲停次數": len(days),
                     "漲停軌跡": " / ".join(dates),
-                    "收盤價": round(float(close.iloc[-1]), 2)
+                    "收盤價":  round(float(close.iloc[-1]), 2),
                 })
 
         except Exception as e:
@@ -89,66 +304,62 @@ def scan():
     return pd.DataFrame(results)
 
 
-def to_html(df):
+# ── 輸出主報表 HTML ──────────────────────────────────────────
+def to_html(df, output_file="index.html"):
     t = (datetime.utcnow() + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
 
     if not df.empty:
-        df_sorted = df.sort_values('漲停次數', ascending=False)
+        df_sorted  = df.sort_values('漲停次數', ascending=False)
         table_html = df_sorted.to_html(index=False, escape=False)
-        count_info = f"<p>共找到 <strong>{len(df)}</strong> 支漲停標的</p>"
+        count_info = f"<p class='count'>共找到 <strong>{len(df)}</strong> 支漲停標的 &nbsp;｜&nbsp; 點擊代碼查看 K 線圖</p>"
     else:
-        table_html = "<h3>⚠️ 近 30 天無漲停標的</h3>"
+        table_html = "<div class='empty'>⚠️ 近 30 天無漲停標的</div>"
         count_info = ""
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-TW">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>台股漲停全紀錄</title>
   <style>
-    body {{
-      font-family: 'Segoe UI', sans-serif;
-      padding: 24px;
-      background: #f5f7fa;
-      color: #333;
-    }}
-    h1 {{ color: #1a73e8; }}
-    p {{ color: #555; }}
-    table {{
-      width: 100%;
-      border-collapse: collapse;
-      background: white;
-      border-radius: 8px;
-      overflow: hidden;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-    }}
-    th, td {{
-      padding: 12px 16px;
-      border-bottom: 1px solid #eee;
-      text-align: center;
-    }}
-    th {{
-      background: #1a73e8;
-      color: white;
-      font-weight: 600;
-    }}
-    tr:last-child td {{ border-bottom: none; }}
-    tr:hover td {{ background: #f0f4ff; }}
+    :root{{--bg:#0d1117;--panel:#161b22;--border:#30363d;
+          --text:#e6edf3;--muted:#8b949e;--accent:#58a6ff;
+          --up:#26a641;--down:#f85149;--limit:#ffa500;}}
+    *{{box-sizing:border-box;margin:0;padding:0;}}
+    body{{background:var(--bg);color:var(--text);
+         font-family:'SF Mono','Fira Code',monospace;padding:32px 24px;}}
+    h1{{font-size:1.6rem;margin-bottom:6px;}}
+    h1 span{{color:var(--accent);}}
+    .meta{{color:var(--muted);font-size:.78rem;margin-bottom:14px;}}
+    .count{{color:var(--muted);font-size:.82rem;margin-bottom:16px;}}
+    .count strong{{color:var(--limit);}}
+    table{{width:100%;border-collapse:collapse;background:var(--panel);
+           border:1px solid var(--border);border-radius:8px;overflow:hidden;}}
+    th{{background:#1c2128;color:var(--muted);font-size:.68rem;
+        text-transform:uppercase;letter-spacing:.06em;
+        padding:12px 16px;text-align:center;border-bottom:1px solid var(--border);}}
+    td{{padding:12px 16px;text-align:center;
+        border-bottom:1px solid var(--border);font-size:.88rem;}}
+    tr:last-child td{{border-bottom:none;}}
+    tr:hover td{{background:#1c2128;}}
+    .empty{{padding:40px;text-align:center;color:var(--muted);}}
   </style>
 </head>
 <body>
-  <h1>🚀 台股 500 檔漲停全紀錄</h1>
-  <p>台北時間：{t}（近 30 天資料）</p>
+  <h1>🚀 台股 500 檔 <span>漲停全紀錄</span></h1>
+  <p class="meta">台北時間：{t}　｜　資料區間：近 30 天</p>
   {count_info}
   {table_html}
 </body>
 </html>"""
 
-    with open("index.html", "w", encoding="utf-8") as f:
+    with open(output_file, "w", encoding="utf-8") as f:
         f.write(html)
-    print("[輸出] index.html 已產生")
+    print(f"[輸出] {output_file} 已產生")
 
 
+# ── 入口 ────────────────────────────────────────────────────
 if __name__ == "__main__":
-    to_html(scan())
+    df = scan(output_dir="charts")
+    to_html(df, output_file="index.html")
