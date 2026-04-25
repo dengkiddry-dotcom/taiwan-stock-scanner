@@ -613,23 +613,32 @@ def gemini_analysis(code: str, name: str, pattern: dict, wash_info: dict,
 
 請直接輸出分析內容，不要加標題或編號。"""
 
-    try:
-        url = (
-            "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
-        )
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.7, "maxOutputTokens": 400}
-        }
-        r = requests.post(url, json=payload, timeout=20)
-        r.raise_for_status()
-        result = r.json()
-        text = result["candidates"][0]["content"]["parts"][0]["text"]
-        return text.strip()
-    except Exception as e:
-        print(f"  [Gemini] 分析失敗：{e}")
-        return "（AI 分析暫時無法使用）"
+
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+    )
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 400}
+    }
+    for attempt in range(3):  # 最多重試 3 次
+        try:
+            r = requests.post(url, json=payload, timeout=20)
+            if r.status_code == 429:
+                wait = 15 * (attempt + 1)
+                print(f"  [Gemini] 限流，等待 {wait} 秒後重試...")
+                time.sleep(wait)
+                continue
+            r.raise_for_status()
+            result = r.json()
+            text = result["candidates"][0]["content"]["parts"][0]["text"]
+            return text.strip()
+        except Exception as e:
+            print(f"  [Gemini] 第 {attempt+1} 次失敗：{e}")
+            if attempt < 2:
+                time.sleep(10)
+    return "（AI 分析暫時無法使用）"
 
 # ── 股票清單 ─────────────────────────────────────────────────
 def get_list():
@@ -770,6 +779,7 @@ def scan(output_dir="charts", base_url="charts"):
 
             # ── Gemini AI 分析 ─────────────────────────────────
             print(f"  [{code}] 呼叫 Gemini 分析...")
+            time.sleep(5)  # 避免 429 限流（免費方案每分鐘 15 次）
             ai_analysis = gemini_analysis(
                 code, name, pattern, wash_info, inst_data, days_since
             )
@@ -815,18 +825,17 @@ def to_html(df, output_file="index.html"):
     t = (datetime.utcnow() + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
 
     if not df.empty:
-        # 綜合排序：型態評分高優先，同分再按洗盤量比小優先，取前 2
-        top2 = (
+        # 按型態評分高到低排序，同分再按洗盤量比小優先，全部輸出
+        all_sorted = (
             df.sort_values(['_score', '_vol_num'], ascending=[False, True])
-            .head(2)
             .drop(columns=['_score', '_vol_num'])
         )
         fire_count = len(df)
-        table_html = top2.to_html(index=False, escape=False)
+        table_html = all_sorted.to_html(index=False, escape=False)
         count_info = (
             f"<p class='count'>"
             f"本次掃描「準備起飛」共 <strong style='color:#d93025'>{fire_count} 支</strong>，"
-            f"以下為 <strong style='color:#ffa500'>型態評分最高的前 2 檔</strong>"
+            f"依型態評分由高到低排列"
             f"&nbsp;｜&nbsp; 點擊代碼查看 K 線圖 + 籌碼 + 型態分析</p>"
         )
     else:
