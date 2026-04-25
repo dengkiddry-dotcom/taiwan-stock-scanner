@@ -6,8 +6,9 @@ import time
 import os
 import json
 
-# ── Gemini API Key（填入你的 key）────────────────────────────
-GEMINI_API_KEY = "AIzaSyCR3lXU-khzTbOu3oSt20WcMeEsrGlHu7Q"  # 從 aistudio.google.com 申請
+# ── Gemini API Key（從環境變數讀取，不要寫在程式碼裡）─────────
+# 設定方式：在命令提示字元執行 setx GEMINI_API_KEY "你的key"
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 
 # ── 抓取中文名稱對照表 ────────────────────────────────────────
