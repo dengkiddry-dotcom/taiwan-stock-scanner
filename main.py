@@ -35,72 +35,85 @@ def fetch_name_map() -> dict:
 # ── 爬三大法人資料 ───────────────────────────────────────────
 def fetch_institutional(code: str, is_tw: bool, days: int = 10) -> list:
     """
-    回傳近 N 天的三大法人資料，格式：
-    [{"date": "04/20", "foreign": 1234, "trust": -200, "dealer": 50}, ...]
-    foreign/trust/dealer 單位：張，正數買超、負數賣超
+    回傳近 N 天的三大法人資料
+    上市用證交所，上櫃用櫃買中心
     """
     results = []
-    today = datetime.now()
+    today   = datetime.now()
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/javascript, */*",
+        "Referer": "https://www.twse.com.tw/",
+    }
 
-    for delta in range(days, 0, -1):
+    def safe_int(s):
+        try:
+            return int(str(s).replace(",", "").replace("+", "").strip())
+        except Exception:
+            return 0
+
+    # 收集近 days 個工作日
+    trading_dates = []
+    for delta in range(1, days * 3):
         d = today - timedelta(days=delta)
-        if d.weekday() >= 5:  # 跳過週末
-            continue
-        date_str = d.strftime("%Y%m%d")
+        if d.weekday() < 5:
+            trading_dates.append(d)
+        if len(trading_dates) >= days:
+            break
 
+    for d in reversed(trading_dates):
+        date_str   = d.strftime("%Y%m%d")
+        date_slash = d.strftime("%Y/%m/%d")
         try:
             if is_tw:
-                # 上市：證交所三大法人
                 url = (
                     f"https://www.twse.com.tw/rwd/zh/fund/T86"
                     f"?response=json&date={date_str}&selectType=ALL"
                 )
-                r = requests.get(url, timeout=8,
-                                 headers={"User-Agent": "Mozilla/5.0"})
+                r = requests.get(url, timeout=10, headers=headers)
+                if r.status_code != 200:
+                    continue
                 data = r.json()
                 if data.get("stat") != "OK":
                     continue
                 for row in data.get("data", []):
-                    if row[0].strip() == code:
-                        # 欄位：代號,名稱,外資買,外資賣,外資淨,投信買,投信賣,投信淨,自營買,自營賣,自營淨
-                        def parse_int(s):
-                            return int(s.replace(",", "").replace("+", ""))
+                    if str(row[0]).strip() == code:
                         results.append({
                             "date":    d.strftime("%m/%d"),
-                            "foreign": parse_int(row[4]),
-                            "trust":   parse_int(row[7]),
-                            "dealer":  parse_int(row[10]),
+                            "foreign": safe_int(row[4]),
+                            "trust":   safe_int(row[7]),
+                            "dealer":  safe_int(row[10]),
                         })
                         break
             else:
-                # 上櫃：櫃買中心三大法人
                 url = (
                     f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/"
-                    f"3itrade_hedge.php?l=zh-tw&se=EW&t=D&d={d.strftime('%Y/%m/%d')}&s=0,asc"
+                    f"3itrade_hedge.php?l=zh-tw&se=EW&t=D"
+                    f"&d={date_slash}&s=0,asc&o=json"
                 )
-                r = requests.get(url, timeout=8,
-                                 headers={"User-Agent": "Mozilla/5.0"})
+                r = requests.get(url, timeout=10, headers=headers)
+                if r.status_code != 200:
+                    continue
                 data = r.json()
                 for row in data.get("aaData", []):
-                    if row[0].strip() == code:
-                        def parse_int(s):
-                            try:
-                                return int(str(s).replace(",", "").replace("+", ""))
-                            except:
-                                return 0
+                    if str(row[0]).strip() == code:
                         results.append({
                             "date":    d.strftime("%m/%d"),
-                            "foreign": parse_int(row[3]),
-                            "trust":   parse_int(row[6]),
-                            "dealer":  parse_int(row[9]),
+                            "foreign": safe_int(row[3]),
+                            "trust":   safe_int(row[6]),
+                            "dealer":  safe_int(row[9]),
                         })
                         break
         except Exception:
             continue
-
-        time.sleep(0.3)  # 避免被封鎖
+        time.sleep(0.4)
 
     return results
+
 
 
 # ── K 線型態分析 ─────────────────────────────────────────────
@@ -603,7 +616,7 @@ def gemini_analysis(code: str, name: str, pattern: dict, wash_info: dict,
     try:
         url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+            f"gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
         )
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
