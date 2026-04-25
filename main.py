@@ -108,7 +108,8 @@ def fetch_institutional(code: str, is_tw: bool, days: int = 10) -> list:
                             "dealer":  safe_int(row[9]),
                         })
                         break
-        except Exception:
+        except Exception as e:
+            print(f"  [法人] {d.strftime('%m/%d')} 錯誤：{e}")
             continue
         time.sleep(0.4)
 
@@ -616,7 +617,7 @@ def gemini_analysis(code: str, name: str, pattern: dict, wash_info: dict,
 
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+        f"gemini-2.0-flash-lite:generateContent?key={GEMINI_API_KEY}"
     )
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
@@ -779,7 +780,7 @@ def scan(output_dir="charts", base_url="charts"):
 
             # ── Gemini AI 分析 ─────────────────────────────────
             print(f"  [{code}] 呼叫 Gemini 分析...")
-            time.sleep(30)  # 避免 429 限流（免費方案每分鐘限制）
+            time.sleep(10)  # 避免 429 限流
             ai_analysis = gemini_analysis(
                 code, name, pattern, wash_info, inst_data, days_since
             )
