@@ -655,7 +655,7 @@ def get_list():
 
 
 # ── 掃描主函式 ───────────────────────────────────────────────
-def scan(output_dir="charts"):
+def scan(output_dir="charts", base_url="charts"):
     os.makedirs(output_dir, exist_ok=True)
 
     print("[名稱] 正在抓取中文名稱對照表...")
@@ -762,7 +762,8 @@ def scan(output_dir="charts"):
             )
 
             # ── 產生 K 線圖 ────────────────────────────────────
-            chart_file = os.path.join(output_dir, f"{code}.html")
+            chart_file      = os.path.join(output_dir, f"{code}.html")
+            chart_link      = f"{base_url}/{code}.html" 
             with open(chart_file, "w", encoding="utf-8") as f:
                 f.write(generate_chart_html(
                     s, name, df, list(limit_days),
@@ -774,7 +775,7 @@ def scan(output_dir="charts"):
                 "_score":    pattern['score'],
                 "_vol_num":  float(vol_ratio_pct.rstrip('%')),
                 "代碼": (
-                    f"<a href='{chart_file}' target='_blank' "
+                    f"<a href='{chart_link}' target='_blank' "
                     f"style='color:#58a6ff;font-weight:700;text-decoration:none'>"
                     f"{code} 📊</a>"
                 ),
@@ -872,5 +873,6 @@ def to_html(df, output_file="index.html"):
 
 # ── 入口 ─────────────────────────────────────────────────────
 if __name__ == "__main__":
-    df = scan(output_dir="charts")
+    # GitHub Pages 部署時 charts/ 資料夾在同層，相對路徑即可
+    df = scan(output_dir="charts", base_url="charts")
     to_html(df, output_file="index.html")
