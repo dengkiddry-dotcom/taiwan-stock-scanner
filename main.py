@@ -626,7 +626,7 @@ def gemini_analysis(code: str, name: str, pattern: dict, wash_info: dict,
         try:
             r = requests.post(url, json=payload, timeout=20)
             if r.status_code == 429:
-                wait = 15 * (attempt + 1)
+                wait = 30 * (attempt + 1)
                 print(f"  [Gemini] 限流，等待 {wait} 秒後重試...")
                 time.sleep(wait)
                 continue
@@ -779,7 +779,7 @@ def scan(output_dir="charts", base_url="charts"):
 
             # ── Gemini AI 分析 ─────────────────────────────────
             print(f"  [{code}] 呼叫 Gemini 分析...")
-            time.sleep(5)  # 避免 429 限流（免費方案每分鐘 15 次）
+            time.sleep(30)  # 避免 429 限流（免費方案每分鐘限制）
             ai_analysis = gemini_analysis(
                 code, name, pattern, wash_info, inst_data, days_since
             )
