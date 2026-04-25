@@ -2,8 +2,8 @@ name: Auto Scan Stock
 
 on:
   schedule:
-    - cron: '0 10 * * *'  # 每天台灣時間 18:00 自動執行
-  workflow_dispatch:       # 可手動觸發
+    - cron: '0 10 * * 1-5'  # 每週一到五台灣時間 18:00 執行
+  workflow_dispatch:
 
 jobs:
   build:
@@ -31,5 +31,5 @@ jobs:
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./        # 把根目錄（含 index.html + charts/）一起推
+          publish_dir: ./
           publish_branch: gh-pages
