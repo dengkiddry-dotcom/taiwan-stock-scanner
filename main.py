@@ -822,6 +822,7 @@ def scan(output_dir="charts", base_url="charts"):
     fetch_end   = today
     results     = []
     total       = len(stocks)
+    price_cache = {}  # 避免同一檔股票重複下載，降低 GitHub Actions 逾時風險
 
     # ── 建立產業資料池（修改2）─────────────────────────────────
     print("[產業] 建立產業資料池...")
@@ -832,11 +833,15 @@ def scan(output_dir="charts", base_url="charts"):
         if not ind:
             continue
         try:
-            df_ind = yf.download(s, start=fetch_start, end=fetch_end, progress=False)
+            if s not in price_cache:
+                price_cache[s] = yf.download(s, start=fetch_start, end=fetch_end, progress=False)
+            df_ind = price_cache[s]
             if df_ind.empty or len(df_ind) < 60:
                 continue
             if isinstance(df_ind.columns, pd.MultiIndex):
+                df_ind = df_ind.copy()
                 df_ind.columns = df_ind.columns.get_level_values(0)
+                price_cache[s] = df_ind
             industry_data.setdefault(ind, []).append(df_ind)
         except Exception:
             continue
@@ -856,12 +861,16 @@ def scan(output_dir="charts", base_url="charts"):
                 print(f"[進度] {i}/{total}，暫停 3 秒...")
                 time.sleep(3)
 
-            df = yf.download(s, start=fetch_start, end=fetch_end, progress=False)
+            if s not in price_cache:
+                price_cache[s] = yf.download(s, start=fetch_start, end=fetch_end, progress=False)
+            df = price_cache[s]
             if df.empty or len(df) < 20:
                 continue
 
             if isinstance(df.columns, pd.MultiIndex):
+                df = df.copy()
                 df.columns = df.columns.get_level_values(0)
+                price_cache[s] = df
 
             close  = df['Close'].squeeze()
             volume = df['Volume'].squeeze()
@@ -1102,6 +1111,12 @@ def scan(output_dir="charts", base_url="charts"):
             pattern['grade'] = "🔥🔥 極強" if ps >= 140 else "🔥 強" if ps >= 100 else "⚠️ 普通" if ps >= 60 else "❌ 弱"
 
             # ── 修改4：是否突破洗盤區間 + 突破強度 + 停損參考價 ──
+            wash_high = 0
+            wash_low = 0
+            is_breakout = False
+            breakout_strength = 0
+            breakout_vol_ratio = 0
+            breakout_str = "-"
             try:
                 limit_idx  = list(close.index).index(last_limit_date)
                 wash_highs = df['High'].iloc[limit_idx+1:-1]
@@ -1138,19 +1153,6 @@ def scan(output_dir="charts", base_url="charts"):
                 wash_low           = 0
 
 
-            # ── 產生 K 線圖 ────────────────────────────────────
-            chart_file      = os.path.join(output_dir, f"{code}.html")
-            chart_link      = f"{base_url}/{code}.html" 
-            with open(chart_file, "w", encoding="utf-8") as f:
-                f.write(generate_chart_html(
-                    s, name, df, list(limit_days),
-                    is_washing, wash_info, pattern,
-                    wash_low_val=wash_low if wash_low else 0,
-                    target_val=float(target_price) if isinstance(target_price, float) else 0,
-                    industry=industry,
-                    industry_stage=industry_stage
-                ))
-
             # KD 共振計算
             try:
                 kd_series = []
@@ -1182,6 +1184,21 @@ def scan(output_dir="charts", base_url="charts"):
             kd_resonance = is_entry and kd_golden
             entry_str    = ("⭐ 共振進場" if kd_resonance else "✅ 進場") if is_entry else "-"
             target_price = round(wash_high * 1.15, 2) if (is_breakout and wash_high) else "-"
+            dates = [d.strftime('%m/%d') for d in limit_days]
+            stage_color = '#26a641' if industry_stage in ['復甦初期', '成長中期'] else '#f85149' if industry_stage == '衰退期' else '#ffa500'
+
+            # ── 產生 K 線圖 ────────────────────────────────────
+            chart_file = os.path.join(output_dir, f"{code}.html")
+            chart_link = f"{base_url}/{code}.html"
+            with open(chart_file, "w", encoding="utf-8") as f:
+                f.write(generate_chart_html(
+                    s, name, df, list(limit_days),
+                    is_washing, wash_info, pattern,
+                    wash_low_val=wash_low if wash_low else 0,
+                    target_val=target_price if isinstance(target_price, (int, float)) else 0,
+                    industry=industry,
+                    industry_stage=industry_stage
+                ))
 
             results.append({
                 "_score":    pattern['score'],
@@ -1194,7 +1211,7 @@ def scan(output_dir="charts", base_url="charts"):
                 "名稱":      name,
                 "市場":      market,
                 "產業":      industry,
-                "產業位階":   f"<span style='color:{{'#26a641' if industry_stage in ['復甓初期','成長中期'] else '#f85149' if industry_stage in ['衰退期'] else '#ffa500'}}'>{industry_stage}</span>",
+                "產業位階":   f"<span style='color:{stage_color}'>{industry_stage}</span>",
                 "型態評分":   f"<span style='color:{'#26a641' if pattern['score']>=70 else '#ffa500' if pattern['score']>=50 else '#f85149'};font-weight:700'>{pattern['score']} 分 {pattern['grade']}</span>",
                 "洗盤量比":   vol_ratio_pct,
                 "距漲停天數": days_since,
@@ -1237,7 +1254,7 @@ def to_html(df, output_file="index.html"):
         )
         count_info = (
             f"<p class='count'>"
-            f"本次揃描共 <strong style='color:#d93025'>{len(df)}</strong> 支符合條件，"
+            f"本次掃描共 <strong style='color:#d93025'>{len(df)}</strong> 支符合條件，"
             f"其中 <strong style='color:#ffa500'>{len(df_break)} 支</strong> 已突破，"
             f"<strong style='color:#58a6ff'>{len(df_watch)} 支</strong> 洗盤中"
             f"&nbsp;｜&nbsp; 點擊代碼查看 K 線圖</p>"
@@ -1286,7 +1303,8 @@ def to_html(df, output_file="index.html"):
     第一關：前 3~10 個交易日內出現漲停（≥9.8%）<br>
     第二關（洗盤三條件同時成立）：縮量 &lt; 50% ＋ 守起漲點 ＋ 站上月線<br>
     第三關（型態評分）：一字板、量能遞減、均線排列、K 棒型態綜合評分<br>
-    📊 最終輸出：所有符合條件標的，依型態評分由高到低排列
+    第四關（產業位階）：依同產業均線結構加減分，區分復甦、成長、高檔與衰退<br>
+    📊 最終輸出：分為已突破與洗盤中，並列出進場訊號、目標價與停損參考
   </div>
   {table_html}
 </body>
@@ -1300,5 +1318,5 @@ def to_html(df, output_file="index.html"):
 # ── 入口 ─────────────────────────────────────────────────────
 if __name__ == "__main__":
     # GitHub Pages 部署時 charts/ 資料夾在同層，相對路徑即可
-    df = scan(output_dir="charts", base_url="charts")
+    df = scan(output_dir="charts", base_url="./charts")
     to_html(df, output_file="index.html")
