@@ -225,14 +225,10 @@ def fetch_official_industry_map() -> dict:
     return result
 
 
-# ── 產業位階 fallback ────────────────────────────────────────
+# ── 產業位階查詢（FIX-09：移除單股 fallback，找不到直接回「未知」）──
 def resolve_industry_stage(code: str, df: pd.DataFrame, industry_lookup: dict, industry_stage_cache: dict) -> tuple:
     industry = industry_lookup.get(code, "未分類")
-    stage = industry_stage_cache.get(industry)
-
-    if not stage or stage == "未知":
-        stage = get_industry_stage([df])
-
+    stage    = industry_stage_cache.get(industry, "未知")
     return industry, stage
 
 
@@ -267,19 +263,21 @@ def _fmt_pct(value):
 
 
 def _forward_return_and_drawdown(close: pd.Series, signal_pos: int, horizon: int) -> tuple:
-    if signal_pos + horizon >= len(close):
+    # FIX-05：進場點改成訊號後第1天（模擬隔天買進），不用當天收盤
+    entry_iloc = signal_pos + 1
+    if entry_iloc + horizon >= len(close):
         return None, None
 
-    entry_price = float(close.iloc[signal_pos])
+    entry_price = float(close.iloc[entry_iloc])
     if entry_price <= 0:
         return None, None
 
-    future_window = close.iloc[signal_pos + 1: signal_pos + horizon + 1].astype(float)
+    future_window = close.iloc[entry_iloc + 1: entry_iloc + horizon + 1].astype(float)
     if future_window.empty:
         return None, None
 
-    end_return = float(close.iloc[signal_pos + horizon]) / entry_price - 1
-    max_drawdown = float(future_window.min()) / entry_price - 1
+    end_return    = float(close.iloc[entry_iloc + horizon]) / entry_price - 1
+    max_drawdown  = float(future_window.min()) / entry_price - 1
     return end_return, max_drawdown
 
 
@@ -348,16 +346,17 @@ def backtest_strategy(df: pd.DataFrame, horizons=(5, 10, 20)) -> dict:
             if limit_vol <= 0 or pd.isna(ma20):
                 continue
 
-            shrink = curr_vol < limit_vol * 0.5
+            shrink   = curr_vol < limit_vol * 0.5
             hold_low = curr_price >= limit_low
             above_ma = curr_price > ma20
-            prev_price = float(close.iloc[cur_i - 1])
 
-            is_washing = (
-                (shrink and hold_low and above_ma)
-                or (above_ma and curr_vol > limit_vol * 0.8 and curr_price > prev_price)
-            )
+            # FIX-01：洗盤本質 = 縮量 + 不破低 + 趨勢仍在，移除「放量上漲也算」
+            is_washing = shrink and hold_low and above_ma
             if not is_washing:
+                continue
+
+            # FIX-06：訊號去重，同一檔10個交易日內不重複計
+            if signal_positions and cur_i - signal_positions[-1] < 10:
                 continue
 
             signal_positions.append(cur_i)
@@ -462,13 +461,13 @@ def analyze_pattern(df: pd.DataFrame, limit_days: list) -> dict:
 
             if 2 <= wash_days <= 6:
                 score += 15
-                notes.append(f"✅ 洗盤 {wash_days} 天，天數適中（黃金區間 2~6 天）")
+                notes.append(f"✅ 洗盤 {wash_days} 個交易日，天數適中（黃金區間 2~6 交易日）")
             elif wash_days == 1:
                 score += 8
-                notes.append("⚠️ 洗盤僅 1 天，可能尚未完成")
+                notes.append("⚠️ 洗盤僅 1 個交易日，可能尚未完成")
             else:
                 score += 5
-                notes.append(f"⚠️ 洗盤 {wash_days} 天，時間偏長熱度可能已散")
+                notes.append(f"⚠️ 洗盤 {wash_days} 個交易日，時間偏長熱度可能已散")
 
             if len(wash_vol) >= 2:
                 is_shrinking = all(
@@ -1223,9 +1222,10 @@ def scan(output_dir="charts", base_url="charts"):
     name_map = fetch_name_map()
 
     official_industry_map = fetch_official_industry_map()
-    industry_lookup = official_industry_map.copy()
-    industry_lookup.update(industry_map)
-    print(f"[產業] 產業分類對照表合計 {len(industry_lookup)} 筆")
+    # FIX-08：手動先、官方覆蓋 → 官方資料優先
+    industry_lookup = industry_map.copy()
+    industry_lookup.update(official_industry_map)
+    print(f"[產業] 產業分類對照表合計 {len(industry_lookup)} 筆（官方優先）")
 
     stocks      = get_list()
     today       = datetime.now()
@@ -1281,7 +1281,44 @@ def scan(output_dir="charts", base_url="charts"):
     else:
         print("[基準日] 無法確認最後交易日，以各股最後一筆為準")
 
-    print(f"[掃描] 共 {total} 支，雙名單：A觀察名單（1~10天整理）+ B二波確認（今日再漲停）")
+    # ── NEW-01：大盤濾網 ──────────────────────────────────────
+    market_status = {"twii_ok": None, "tpex_ok": None,
+                     "twii_close": None, "twii_ma20": None,
+                     "tpex_close": None, "tpex_ma20": None}
+    for idx_sym, key_prefix in [("^TWII", "twii"), ("^TPEX", "tpex")]:
+        try:
+            _mdf = yf.download(idx_sym, start=today - timedelta(days=60),
+                               end=today + timedelta(days=1), progress=False)
+            if not _mdf.empty:
+                if isinstance(_mdf.columns, pd.MultiIndex):
+                    _mdf.columns = _mdf.columns.get_level_values(0)
+                _mc   = _mdf["Close"].squeeze().astype(float)
+                _last = float(_mc.iloc[-1])
+                _ma20 = float(_mc.rolling(20).mean().iloc[-1])
+                market_status[f"{key_prefix}_close"] = round(_last, 2)
+                market_status[f"{key_prefix}_ma20"]  = round(_ma20, 2)
+                market_status[f"{key_prefix}_ok"]    = _last >= _ma20
+        except Exception:
+            pass
+
+    _both_ok  = market_status["twii_ok"] and market_status["tpex_ok"]
+    _one_bad  = (market_status["twii_ok"] is False) or (market_status["tpex_ok"] is False)
+    _both_bad = (market_status["twii_ok"] is False) and (market_status["tpex_ok"] is False)
+
+    if _both_ok:
+        market_warn = 0
+        print("[大盤] ✅ 加權 + 櫃買均站上MA20，正常掃描")
+    elif _both_bad:
+        market_warn = 2
+        print("[大盤] ❌❌ 加權 + 櫃買均跌破MA20，名單A全體評分 -40，高風險")
+    elif _one_bad:
+        market_warn = 1
+        print("[大盤] ⚠️ 加權或櫃買其一跌破MA20，名單A全體評分 -20，需謹慎")
+    else:
+        market_warn = 0
+        print("[大盤] ❓ 大盤狀態無法確認，不調整評分")
+
+    print(f"[掃描] 共 {total} 支，雙名單：A觀察名單（1~10交易日整理）+ B二波確認（今日再漲停）")
 
     for i, s in enumerate(stocks):
         try:
@@ -1380,10 +1417,12 @@ def scan(output_dir="charts", base_url="charts"):
             if first_limit_date is None:
                 continue
 
-            # ── 近三個月內首次漲停 ───────────────────────────────────
-            three_months_ago = first_limit_date - pd.DateOffset(months=3)
+            # ── 近三個月內首次漲停（63 個交易日）────────────────────
+            # 用 iloc 往前找 63 個交易日，不用 calendar DateOffset
+            first_limit_iloc_in_all = first_limit_iloc   # 已是 trading_days 的 iloc
+            lookback_start_iloc = max(0, first_limit_iloc - 63)
             prior_limits = [d for d in all_limit_close
-                            if d < first_limit_date and d >= three_months_ago]
+                            if trading_days[lookback_start_iloc] <= d < first_limit_date]
             if prior_limits:
                 continue
 
@@ -1422,6 +1461,19 @@ def scan(output_dir="charts", base_url="charts"):
             above_ma   = today_close > ma20
             ma_bullish = today_close > ma5 > ma10 > ma20
 
+            # FIX-02：整理期每天「收盤」不能跌破首漲停最低價
+            #          盤中可以破底，但收盤必須守住（洗盤不破底原則）
+            if wash_closes and any(wc < limit_low for wc in wash_closes):
+                continue
+            if today_close < limit_low:
+                continue
+
+            # FIX-03：整理震盪幅度 > 15% 代表主力未控盤，淘汰
+            if wash_highs_day and wash_lows_day and limit_low > 0:
+                volatility = (wash_period_high - wash_period_low) / limit_low
+                if volatility > 0.15:
+                    continue
+
             # ── 連續縮量（評分用）────────────────────────────────────
             shrink_breaks = sum(
                 1 for k in range(len(wash_vols) - 1)
@@ -1459,9 +1511,10 @@ def scan(output_dir="charts", base_url="charts"):
                 if today_close < limit_low:
                     continue
 
-                # A5：今日站上 MA5（週末時 MA5 以最後交易日計算，正常）
-                if today_close < ma5:
-                    continue
+                # FIX-04：均線條件放寬為站上 MA20 即可進名單
+                #          MA多頭排列（MA5>MA10>MA20）影響分級，不直接淘汰
+                if not above_ma:
+                    continue   # 跌破月線才淘汰
 
                 # A6：整理期間無第二根漲停（確保尚未發動）
                 wash_second_limit = False
@@ -1491,8 +1544,20 @@ def scan(output_dir="charts", base_url="charts"):
                     tier     = "🟡 整理中"
                     tier_key = 3
 
-                list_type     = "A"
+                list_type      = "A"
                 hold_limit_low = today_close >= limit_low
+
+                # NEW-02：觀察名單 A+/A/B 內部分級
+                avg_wash_vol_for_grade = sum(wash_vols) / len(wash_vols) if wash_vols else limit_vol
+                if (ma_bullish
+                        and avg_wash_vol_for_grade < limit_vol * 0.50
+                        and industry_stage in ("成長中期", "復甦初期")):
+                    list_a_grade = "A+"
+                elif (above_ma
+                        and avg_wash_vol_for_grade < limit_vol * 0.70):
+                    list_a_grade = "A"
+                else:
+                    list_a_grade = "B"
 
             # ══════════════════════════════════════════════════════════
             # 名單B：二波確認名單 — 今日再度漲停
@@ -1511,6 +1576,7 @@ def scan(output_dir="charts", base_url="charts"):
                 tier       = "🔥 二波確認"
                 tier_key   = 0   # 最優先
                 list_type  = "B"
+                list_a_grade  = "-"
                 hold_limit_low = True
 
             # ── 通過！────────────────────────────────────────────────
@@ -1560,16 +1626,16 @@ def scan(output_dir="charts", base_url="charts"):
             # ── 整理天數加分 ──────────────────────────────────────────
             if wash_days_count <= 1:
                 pattern['score'] += 30
-                wash_score_notes.append(f"✅ 整理僅 {wash_days_count} 天，超急洗型，主力強力鎖碼")
+                wash_score_notes.append(f"✅ 整理僅 {wash_days_count} 個交易日，超急洗型，主力強力鎖碼")
             elif wash_days_count <= 3:
                 pattern['score'] += 25
-                wash_score_notes.append(f"✅ 整理 {wash_days_count} 天，急洗急噴型，控盤力強")
+                wash_score_notes.append(f"✅ 整理 {wash_days_count} 個交易日，急洗急噴型，控盤力強")
             elif wash_days_count <= 5:
                 pattern['score'] += 15
-                wash_score_notes.append(f"✅ 整理 {wash_days_count} 天，節奏標準")
+                wash_score_notes.append(f"✅ 整理 {wash_days_count} 個交易日，節奏標準")
             else:
                 pattern['score'] += 5
-                wash_score_notes.append(f"⚠️ 整理 {wash_days_count} 天，熱度略散")
+                wash_score_notes.append(f"⚠️ 整理 {wash_days_count} 個交易日，熱度略散")
 
             # ── 連續縮量加分 ──────────────────────────────────────────
             if is_continuous_shrink:
@@ -1716,6 +1782,15 @@ def scan(output_dir="charts", base_url="charts"):
                 pattern['notes'].insert(0, f"{stage_emoji} 產業位階：{industry_stage}（{'+' if stage_bonus>0 else ''}{stage_bonus} 分）")
 
             ps = pattern['score']
+
+            # NEW-01：大盤濾網加減分
+            market_adj = {0: 0, 1: -20, 2: -40}.get(market_warn, 0)
+            if list_type == "A" and market_adj != 0:
+                pattern['score'] += market_adj
+                pattern['notes'].insert(0,
+                    f"{'⚠️' if market_warn==1 else '❌'} 大盤{'一指數' if market_warn==1 else '雙指數'}跌破MA20（評分{market_adj}分）")
+
+            ps = pattern['score']
             pattern['grade'] = "🔥🔥 極強" if ps >= 140 else "🔥 強" if ps >= 100 else "⚠️ 普通" if ps >= 60 else "❌ 弱"
 
             # ── 整理區間參考價 ───────────────────────────────────────
@@ -1761,22 +1836,33 @@ def scan(output_dir="charts", base_url="charts"):
                 risk_pct     = None
                 target_price = "-"
 
+            # ── NEW-03：雙停損 ──────────────────────────────────────
+            stop_loss_aggressive = round(wash_period_low, 2) if wash_period_low else "-"  # 積極：整理低點
+            stop_loss_defensive  = round(limit_low, 2) if limit_low else "-"              # 防守：首漲停最低價
+
+            # ── NEW-04：隔日掛單策略 ─────────────────────────────────
+            today_vs_high = today_close / wash_high_close if wash_high_close else 1
+            vol_warning   = "⚠️量偏大，注意出貨 " if today_vol > limit_vol * 0.60 else ""
+
             if list_type == "B":
                 order_type    = "二波確認"
                 order_display = round(wash_high_close, 2) if wash_high_close else entry_ref
-                order_note    = "今日二波漲停；明日勿追，等回測整理高點不破再進場"
-            elif tier_key == 1:
+                order_note    = f"{vol_warning}今日二波漲停；明日勿追，等回測整理高點不破再進場"
+            elif tier_key == 1:   # 靠近突破
                 order_type    = "突破掛單"
                 order_display = round(wash_high_close * 1.005, 2) if wash_high_close else entry_ref
-                order_note    = "已突破整理高點；明日開盤突破位掛單，量縮守位才進"
-            elif tier_key == 2:
+                if today_vs_high >= 0.97:
+                    order_note = f"{vol_warning}平盤±1% 可試單，量縮優先；開太高不追"
+                else:
+                    order_note = f"{vol_warning}等開盤站上整理高點再追，勿搶進"
+            elif tier_key == 2:   # 卡位觀察
                 order_type    = "卡位試單"
                 order_display = round(wash_high_close * 1.005, 2) if wash_high_close else entry_ref
-                order_note    = "靠近突破位；可小量卡位，突破確認後加碼"
-            else:
+                order_note    = f"{vol_warning}靠近突破位；可小量卡位，突破確認後加碼"
+            else:                 # 整理中
                 order_type    = "持續觀察"
                 order_display = round(wash_high_close * 1.005, 2) if wash_high_close else entry_ref
-                order_note    = "整理中；等股價靠近突破位（整理高×97%）再考慮介入"
+                order_note    = f"{vol_warning}整理中，若開盤跌破整理低點直接放棄"
 
             if kd_golden:
                 order_note += "｜KD黃金交叉共振"
@@ -1811,19 +1897,21 @@ def scan(output_dir="charts", base_url="charts"):
                 ),
                 "名稱":       name,
                 "市場":       market,
+                "名單":       "🔥二波確認" if list_type=="B" else "📋觀察名單",
+                "分級":       list_a_grade,
                 "產業":       industry,
                 "產業位階":    f"<span style='color:{stage_color}'>{industry_stage}</span>",
-                "型態評分":    f"<span style='color:{'#26a641' if pattern['score']>=70 else '#ffa500' if pattern['score']>=50 else '#f85149'};font-weight:700'>{pattern['score']} 分 {pattern['grade']}</span>",
-                "名單":        "🔥二波確認" if list_type=="B" else "📋觀察名單",
-                "今日量/首波":  vol_ratio_pct,
-                "整理天數":    days_since,
-                "首漲停板":    pattern['limit_quality'],
-                "收盤價":     round(curr_price, 2),
-                "漲停軌跡":    " / ".join(dates),
+                "型態評分":    f"<span style='color:{'#26a641' if pattern['score']>=140 else '#ffa500' if pattern['score']>=100 else '#f85149'};font-weight:700'>{pattern['score']} {pattern['grade']}</span>",
                 "狀態分層":    breakout_str,
+                "整理(交易日)": days_since,
+                "今日量/首波":  vol_ratio_pct,
+                "收盤價":     round(curr_price, 2),
+                "首漲停板":    pattern['limit_quality'],
+                "漲停軌跡":    " / ".join(dates),
                 "隔日策略":    order_type,
                 "進場參考價":  order_display,
-                "停損參考":    stop_loss_ref,
+                "積極停損":    stop_loss_aggressive,
+                "防守停損":    stop_loss_defensive,
                 "2R目標價":   target_price,
                 "單筆風險":    _fmt_pct(risk_pct),
                 "執行備註":    order_note,
@@ -1882,6 +1970,26 @@ def to_html(df, output_file="index.html"):
         table_html = "<div class='empty'>⚠️ 目前無符合條件標的</div>"
         count_info = ""
 
+    # 大盤狀態 HTML
+    def _mkt_badge(ok, label, close_val, ma20_val):
+        if ok is None:
+            return f"<span style='color:#8b949e'>{label} ❓</span>"
+        color = "#26a641" if ok else "#f85149"
+        icon  = "✅" if ok else "❌"
+        return (f"<span style='color:{color}'>{icon} {label} "
+                f"{close_val}（MA20:{ma20_val}）</span>")
+
+    twii_badge = _mkt_badge(market_status.get("twii_ok"),
+                            "加權", market_status.get("twii_close","?"),
+                            market_status.get("twii_ma20","?"))
+    tpex_badge = _mkt_badge(market_status.get("tpex_ok"),
+                            "櫃買", market_status.get("tpex_close","?"),
+                            market_status.get("tpex_ma20","?"))
+    mkt_warn_color = "#26a641" if market_warn==0 else "#ffa500" if market_warn==1 else "#f85149"
+    mkt_warn_text  = ["✅ 大盤多頭，正常操作",
+                      "⚠️ 大盤偏弱，降低部位",
+                      "❌ 大盤空頭，謹慎勿追"][market_warn]
+
     html = f"""<!DOCTYPE html>
 <html lang="zh-TW">
 <head>
@@ -1915,14 +2023,20 @@ def to_html(df, output_file="index.html"):
 </head>
 <body>
   <h1>🚀 漲停縮量 <span>洗盤起飛</span> 偵測系統</h1>
-  <p class="meta">台北時間：{t}　｜　選股區間：前 3~10 個交易日</p>
+  <p class="meta">台北時間：{t}　｜　選股區間：1~10 個交易日整理</p>
+  <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:10px 18px;margin-bottom:14px;font-size:.82rem;display:flex;gap:24px;flex-wrap:wrap;align-items:center;">
+    <span style="color:{mkt_warn_color};font-weight:700">{mkt_warn_text}</span>
+    {twii_badge}&nbsp;&nbsp;{tpex_badge}
+  </div>
   {count_info}
   <div class="hint">
     <b>💡 選股邏輯（兩張名單）</b><br>
-    📋 <b>觀察名單</b>：首漲停後整理 2~10 天，收盤在漲停價 ±8% 內，整理均量 &lt; 首波70%，守住漲停日最低價，今日站上MA5，尚未二波<br>
-    🔥 <b>二波確認</b>：首漲停後整理 2~6 天，收盤在漲停價 ±5% 內，今日再度漲停（事後確認）<br>
+    📋 <b>觀察名單</b>：首漲停後整理 1~10 個交易日，收盤在漲停價 ±8% 內，整理均量 &lt; 首波70%，守住漲停日最低價，今日站上MA5，尚未二波<br>
+    🔥 <b>二波確認</b>：首漲停後整理 1~6 個交易日，收盤在漲停價 ±5% 內，今日再度漲停（事後確認）<br>
     四層輸出：🔥 二波確認 ／ 🟢 靠近突破 ／ 🔴 卡位觀察 ／ 🟡 整理中<br>
-    ⚡ 操作：🔥明日回測不破進 ／ 🟢突破掛單 ／ 🔴小量試單 ／ 🟡繼續等
+    分級：A+ 量縮嚴格＋多頭排列＋成長產業 ／ A 量縮守位 ／ B 基本通過<br>
+    雙停損：積極停損=整理低點 ／ 防守停損=首漲停最低價<br>
+    ⚡ 操作：🔥回測不破進 ／ 🟢突破掛單 ／ 🔴卡位試單 ／ 🟡繼續等
   </div>
   {table_html}
 </body>
