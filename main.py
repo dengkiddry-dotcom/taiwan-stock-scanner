@@ -597,7 +597,7 @@ def analyze_pattern(df: pd.DataFrame, limit_days: list) -> dict:
 
 
 # ── K 線圖 HTML ──────────────────────────────────────────────
-def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, pattern, wash_low_val=0, target_val=0, industry='', industry_stage=''):
+def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, pattern, wash_low_val=0, target_val=0, entry_val=0, industry='', industry_stage=''):
     code   = symbol.split('.')[0]
     market = "上市" if symbol.endswith(".TW") else "上櫃"
 
@@ -666,6 +666,7 @@ def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, pat
 
     data_json   = json.dumps(records, ensure_ascii=False)
     ref_lines   = json.dumps({
+        "entry":     round(entry_val,    2) if entry_val    else 0,
         "stop_loss": round(wash_low_val, 2) if wash_low_val else 0,
         "target":    round(target_val,   2) if target_val   else 0,
     })
@@ -960,7 +961,15 @@ function draw() {{
     if(!kdStarted){{kdc.moveTo(x,y);kdStarted=true;}}else kdc.lineTo(x,y);
   }}); kdc.stroke();
 
-  // 停損線 & 目標價線（水平參考線）
+  // 隔日掛單價、停損線 & 目標價線（水平參考線）
+  if(REF_LINES.entry > 0){{
+    const y=py(REF_LINES.entry);
+    kc.strokeStyle='#58a6ff88'; kc.lineWidth=1.5; kc.setLineDash([6,3]);
+    kc.beginPath(); kc.moveTo(PL,y); kc.lineTo(w-PR,y); kc.stroke();
+    kc.setLineDash([]);
+    kc.fillStyle='#58a6ff'; kc.font='bold 10px SF Mono,monospace'; kc.textAlign='left';
+    kc.fillText(`掛單 ${{REF_LINES.entry}}`,w-PR+4,y-3);
+  }}
   if(REF_LINES.stop_loss > 0){{
     const y=py(REF_LINES.stop_loss);
     kc.strokeStyle='#f8514988'; kc.lineWidth=1.5; kc.setLineDash([6,3]);
@@ -1469,11 +1478,40 @@ def scan(output_dir="charts", base_url="charts"):
             except Exception:
                 kd_golden = False
 
-            is_entry     = (is_breakout and breakout_vol_ratio >= 0.5 and
-                            pattern['score'] >= 100 and curr_price > wash_high * 1.01) if is_breakout and wash_high else False
+            # ── 隔日掛單參考（供隔日下單，不作為當日追價）────────────
+            # 洗盤中：隔日採「突破掛單」，觸價才進場；未觸價不買。
+            # 已突破：不建議隔日追高，改以「回測突破價不破」作為觀察價。
+            next_order_price = round(wash_high * 1.01, 2) if wash_high else "-"
+            pullback_ref = round(wash_high, 2) if (is_breakout and wash_high) else "-"
+            stop_loss_ref = round(wash_low, 2) if wash_low else "-"
+
+            if isinstance(next_order_price, (int, float)) and isinstance(stop_loss_ref, (int, float)):
+                risk = next_order_price - stop_loss_ref
+                risk_pct = risk / next_order_price if next_order_price > 0 else None
+                target_price = round(next_order_price + risk * 2, 2) if risk > 0 else "-"
+            else:
+                risk = None
+                risk_pct = None
+                target_price = "-"
+
+            is_entry = (
+                is_breakout and breakout_vol_ratio >= 0.5 and
+                pattern['score'] >= 100 and curr_price > wash_high * 1.01
+            ) if is_breakout and wash_high else False
             kd_resonance = is_entry and kd_golden
-            entry_str    = ("⭐ 共振進場" if kd_resonance else "✅ 進場") if is_entry else "-"
-            target_price = round(wash_high * 1.15, 2) if (is_breakout and wash_high) else "-"
+
+            if is_breakout:
+                order_type = "回測觀察"
+                order_note = "已突破，隔日勿追高；等回測突破價不破"
+                order_display = pullback_ref
+            else:
+                order_type = "突破掛單"
+                order_note = "隔日突破掛單；未觸價不進場"
+                order_display = next_order_price
+
+            if kd_resonance:
+                order_note = "KD共振；仍以隔日掛單/回測條件執行"
+
             dates = [d.strftime('%m/%d') for d in limit_days]
             stage_color = '#26a641' if industry_stage in ['復甦初期', '成長中期'] else '#f85149' if industry_stage == '衰退期' else '#ffa500'
 
@@ -1490,6 +1528,7 @@ def scan(output_dir="charts", base_url="charts"):
                     is_washing, wash_info, pattern,
                     wash_low_val=wash_low if wash_low else 0,
                     target_val=target_price if isinstance(target_price, (int, float)) else 0,
+                    entry_val=next_order_price if isinstance(next_order_price, (int, float)) else 0,
                     industry=industry,
                     industry_stage=industry_stage
                 ))
@@ -1513,9 +1552,12 @@ def scan(output_dir="charts", base_url="charts"):
                 "收盤價":    round(curr_price, 2),
                 "漲停軌跡":   " / ".join(dates),
                 "突破洗盤":    breakout_str,
-                "進場訊號":    entry_str,
-                "目標價":      target_price,
-                "停損參考":    round(wash_low, 2) if wash_low else "-",
+                "隔日策略":    order_type,
+                "隔日掛單/觀察價": order_display,
+                "停損參考":    stop_loss_ref,
+                "2R目標價":    target_price,
+                "單筆風險":    _fmt_pct(risk_pct),
+                "執行備註":    order_note,
                 "回測樣本":    bt_samples,
                 "5日勝率":     _fmt_pct(bt.get("win_5")),
                 "10日勝率":    _fmt_pct(bt.get("win_10")),
@@ -1605,7 +1647,7 @@ def to_html(df, output_file="index.html"):
     第三關（型態評分）：一字板、量能遞減、均線排列、K 棒型態綜合評分<br>
     第四關（產業位階）：依同產業均線結構加減分，區分復甦、成長、高檔與衰退<br>
     第五關（歷史回測）：統計同檔股票過去類似訊號後 5/10/20 日勝率與報酬<br>
-    📊 最終輸出：分為已突破與洗盤中，並列出進場訊號、目標價、停損參考與回測表現
+    📊 最終輸出：分為已突破與洗盤中，並列出隔日掛單/觀察價、停損參考、2R目標價與回測表現
   </div>
   {table_html}
 </body>
