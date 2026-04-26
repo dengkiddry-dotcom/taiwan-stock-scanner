@@ -2,17 +2,13 @@ name: Auto Scan Stock
 
 on:
   schedule:
-    - cron: '0 10 * * 1-5'  # 台北時間週一至週五 18:00
-  workflow_dispatch:      # 手動執行按鈕
+    - cron: '0 10 * * 1-5'  # 每週一到五台灣時間 18:00 執行
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 50
-    # --- 關鍵修正 1：開啟寫入權限，否則 Deploy 會失敗 ---
-    permissions:
-      contents: write
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -32,12 +28,9 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python main.py
 
-      # --- 關鍵修正 2：確保將產出的 index.html 與 charts 資料夾推送到 gh-pages ---
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./         # 部署目前目錄下所有產出的檔案
-          publish_branch: gh-pages # 這是你的網頁分支
-          # 強制排除一些不需要的程式碼，只讓網頁檔案上線 (選配)
-          exclude_assets: '.github,main.py,requirements.txt'
+          publish_dir: ./
+          publish_branch: gh-pages
