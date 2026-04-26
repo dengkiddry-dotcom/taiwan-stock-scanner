@@ -83,54 +83,182 @@ industry_map = {
 
 # ── 產業位階判斷 ─────────────────────────────────────────────
 def get_industry_stage(industry_dfs: list) -> str:
-    """用同產業股票的均線結構判斷景氣位階"""
-    count = len(industry_dfs)
-    if count == 0:
+    """
+    用同產業股票的均線結構判斷產業位階。
+    修正重點：
+    1. MA240 只用有 240 日以上資料的股票當分母，避免 r240 被低估。
+    2. 不符合明確多空條件時回傳「盤整過渡」，不要一律判為「衰退期」。
+    """
+    if not industry_dfs:
         return "未知"
 
     above_ma20 = above_ma60 = above_ma240 = 0
-    valid = 0
+    valid60 = 0
+    valid240 = 0
 
     for df in industry_dfs:
-        close = df["Close"].squeeze()
-        if len(close) < 60:
-            continue
-        valid += 1
-        curr  = float(close.iloc[-1])
-        ma20  = float(close.rolling(20).mean().iloc[-1])
-        ma60  = float(close.rolling(60).mean().iloc[-1])
-        if curr > ma20:  above_ma20  += 1
-        if curr > ma60:  above_ma60  += 1
-        if len(close) >= 240:
-            ma240 = float(close.rolling(240).mean().iloc[-1])
-            if curr > ma240: above_ma240 += 1
+        try:
+            close = df["Close"].squeeze()
+            if not isinstance(close, pd.Series) or len(close) < 60:
+                continue
 
-    if valid == 0:
+            curr = float(close.iloc[-1])
+            ma20 = float(close.rolling(20).mean().iloc[-1])
+            ma60 = float(close.rolling(60).mean().iloc[-1])
+
+            valid60 += 1
+            if curr > ma20:
+                above_ma20 += 1
+            if curr > ma60:
+                above_ma60 += 1
+
+            if len(close) >= 240:
+                ma240 = float(close.rolling(240).mean().iloc[-1])
+                valid240 += 1
+                if curr > ma240:
+                    above_ma240 += 1
+        except Exception:
+            continue
+
+    if valid60 == 0:
         return "未知"
 
-    r20  = above_ma20  / valid
-    r60  = above_ma60  / valid
-    r240 = above_ma240 / valid
+    r20 = above_ma20 / valid60
+    r60 = above_ma60 / valid60
+    r240 = above_ma240 / valid240 if valid240 > 0 else None
 
-    if r20 > 0.7 and r60 > 0.6 and r240 < 0.5:
+    # 多數股票站上月線與季線，但年線尚未全面轉強：復甦初期
+    if r20 >= 0.65 and r60 >= 0.55 and (r240 is None or r240 < 0.55):
         return "復甦初期"
-    elif r20 > 0.7 and r60 > 0.7 and r240 > 0.6:
+
+    # 多數股票同時站上月線、季線、年線：成長中期
+    if r20 >= 0.65 and r60 >= 0.65 and (r240 is None or r240 >= 0.55):
         return "成長中期"
-    elif r20 < 0.5 and r60 > 0.6:
+
+    # 短線轉弱但中長線仍撐住：高檔成熟
+    if r20 < 0.50 and r60 >= 0.55:
         return "高檔成熟"
-    else:
+
+    # 月線、季線多數跌破：衰退期
+    if r20 < 0.45 and r60 < 0.45:
         return "衰退期"
+
+    return "盤整過渡"
+
+
+# ── 官方產業分類抓取 ─────────────────────────────────────────
+def normalize_industry_name(raw: str) -> str:
+    """將交易所產業別名稱簡化，避免顯示過長。"""
+    if not raw:
+        return ""
+
+    name = str(raw).strip()
+    name = name.replace("業", "").replace("類", "").replace("股票", "")
+
+    # 常見分類簡化
+    mapping_keywords = [
+        ("半導體", "半導體"),
+        ("電子零組件", "電子零組件"),
+        ("電腦及週邊", "電腦週邊"),
+        ("通信網路", "網通伺服器"),
+        ("光電", "光電"),
+        ("電子通路", "電子通路"),
+        ("資訊服務", "資訊服務"),
+        ("其他電子", "其他電子"),
+        ("金融保險", "金融"),
+        ("航運", "航運"),
+        ("鋼鐵", "鋼鐵"),
+        ("塑膠", "石化"),
+        ("油電燃氣", "油電燃氣"),
+        ("化學", "化工"),
+        ("生技醫療", "生技"),
+        ("電機機械", "電機"),
+        ("建材營造", "建設"),
+        ("食品", "食品"),
+        ("水泥", "水泥"),
+        ("紡織", "紡織"),
+        ("汽車", "汽車"),
+        ("觀光餐旅", "觀光"),
+        ("貿易百貨", "貿易百貨"),
+    ]
+    for key, value in mapping_keywords:
+        if key in name:
+            return value
+
+    return name or "其他"
+
+
+def fetch_official_industry_map() -> dict:
+    """
+    從 TWSE/TPEX 公司基本資料 OpenAPI 抓官方產業別。
+    若 API 欄位名稱異動，使用模糊欄位比對，避免整批失效。
+    """
+    result = {}
+
+    sources = [
+        ("上市", "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"),
+        ("上櫃", "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O"),
+    ]
+
+    for label, url in sources:
+        try:
+            r = requests.get(url, timeout=15)
+            data = r.json()
+            added = 0
+
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+
+                code = (
+                    item.get("公司代號")
+                    or item.get("股票代號")
+                    or item.get("SecuritiesCompanyCode")
+                    or item.get("Code")
+                    or ""
+                )
+                code = str(code).strip()
+
+                industry = (
+                    item.get("產業別")
+                    or item.get("產業類別")
+                    or item.get("Industry")
+                    or item.get("IndustryType")
+                    or ""
+                )
+
+                # 欄位名稱若不同，模糊找「產業」欄位
+                if not industry:
+                    for k, v in item.items():
+                        if "產業" in str(k) or "Industry" in str(k):
+                            industry = v
+                            break
+
+                if code.isdigit() and len(code) == 4 and industry:
+                    result[code] = normalize_industry_name(industry)
+                    added += 1
+
+            print(f"[產業] 官方{label}產業別取得 {added} 筆")
+        except Exception as e:
+            print(f"[產業] 官方{label}產業別 API 失敗：{e}")
+
+    return result
 
 
 # ── 產業位階 fallback ────────────────────────────────────────
-def resolve_industry_stage(code: str, df: pd.DataFrame, industry_stage_cache: dict, market_stage: str) -> tuple:
-    """回傳產業與位階；若股票未在 industry_map，改用全市場位階，避免顯示未知。"""
-    industry = industry_map.get(code, "其他")
+def resolve_industry_stage(code: str, df: pd.DataFrame, industry_lookup: dict, industry_stage_cache: dict) -> tuple:
+    """
+    回傳產業與位階。
+    修正重點：
+    1. 不再把未分類股票全部塞成「其他」並套用同一個市場位階。
+    2. 有官方/手動產業分類就用產業位階。
+    3. 若真的找不到產業，顯示「未分類」，位階以該股自身均線結構估計。
+    """
+    industry = industry_lookup.get(code, "未分類")
     stage = industry_stage_cache.get(industry)
 
     if not stage or stage == "未知":
-        # 未分類股票先用全市場位階；若仍未知，再用個股本身均線結構判斷
-        stage = market_stage if market_stage and market_stage != "未知" else get_industry_stage([df])
+        stage = get_industry_stage([df])
 
     return industry, stage
 
@@ -829,6 +957,12 @@ def scan(output_dir="charts", base_url="charts"):
     print("[名稱] 正在抓取中文名稱對照表...")
     name_map = fetch_name_map()
 
+    # 官方產業別為主，手動 industry_map 作為補充/覆蓋較細分類
+    official_industry_map = fetch_official_industry_map()
+    industry_lookup = official_industry_map.copy()
+    industry_lookup.update(industry_map)
+    print(f"[產業] 產業分類對照表合計 {len(industry_lookup)} 筆")
+
     stocks      = get_list()
     today       = datetime.now()
     fetch_start = today - timedelta(days=730)  # 抓兩年資料，K 線圖顯示兩年 + 首次漲停回溯
@@ -842,7 +976,7 @@ def scan(output_dir="charts", base_url="charts"):
     industry_data = {}
     for s in stocks:
         code = s.split('.')[0]
-        ind  = industry_map.get(code)
+        ind  = industry_lookup.get(code)
         if not ind:
             continue
         try:
@@ -860,13 +994,11 @@ def scan(output_dir="charts", base_url="charts"):
             continue
     print(f"[產業] 完成，涵蓋 {len(industry_data)} 個產業")
 
-    # 預先計算各產業位階；另建立「其他」fallback，避免未分類股票顯示未知
+    # 預先計算各產業位階
     industry_stage_cache = {
         ind: get_industry_stage(dfs)
         for ind, dfs in industry_data.items()
     }
-    market_stage = get_industry_stage(list(price_cache.values()))
-    industry_stage_cache["其他"] = market_stage
     print("[產業] 位階快取：" + ", ".join(f"{k}={v}" for k, v in sorted(industry_stage_cache.items())))
 
     print(f"[掃描] 共 {total} 支，條件：前 3~10 交易日首次漲停 + 縮量洗盤 + 型態分析")
@@ -982,7 +1114,7 @@ def scan(output_dir="charts", base_url="charts"):
             name   = name_map.get(code, "")
 
             # 產業分類與位階；未分類股票使用市場位階或個股均線 fallback，避免整欄未知
-            industry, industry_stage = resolve_industry_stage(code, df, industry_stage_cache, market_stage)
+            industry, industry_stage = resolve_industry_stage(code, df, industry_lookup, industry_stage_cache)
 
             wash_info = {
                 "vol_ratio":    vol_ratio_pct,
