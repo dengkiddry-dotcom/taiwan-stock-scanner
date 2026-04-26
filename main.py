@@ -6,6 +6,122 @@ import time
 import os
 import json
 
+# ── 產業分類對照表 ───────────────────────────────────────────
+industry_map = {
+    # 半導體
+    "2330":"半導體","2303":"半導體","2454":"半導體","2379":"半導體",
+    "2337":"半導體","2344":"半導體","2408":"半導體","3443":"半導體",
+    "2385":"半導體","3034":"半導體","6415":"半導體","3711":"半導體",
+    "2449":"半導體","2351":"半導體","3006":"半導體","2367":"半導體",
+    "2364":"半導體","3037":"半導體","3019":"半導體","6274":"半導體",
+    "2360":"半導體","2369":"半導體","3529":"半導體","4967":"半導體",
+    # 電子代工／ODM
+    "2317":"電子代工","2382":"電子代工","2354":"電子代工","2356":"電子代工",
+    "2353":"電子代工","2324":"電子代工","2357":"電子代工","2313":"電子代工",
+    "3231":"電子代工","2395":"電子代工",
+    # PCB／電路板
+    "3008":"PCB","2383":"PCB","6274":"PCB","4904":"PCB",
+    "3044":"PCB","3045":"PCB","8046":"PCB","6239":"PCB",
+    "3005":"PCB","2301":"PCB","3017":"PCB","3023":"PCB",
+    # 網通／伺服器
+    "2308":"網通伺服器","2327":"網通伺服器","3376":"網通伺服器",
+    "6669":"網通伺服器","3293":"網通伺服器","4977":"網通伺服器",
+    "3260":"網通伺服器","6285":"網通伺服器","3702":"網通伺服器",
+    # 面板／顯示
+    "3481":"面板","2409":"面板","3006":"面板",
+    # 電源／被動元件
+    "2409":"被動元件","2458":"被動元件","2474":"被動元件",
+    "6278":"被動元件","2376":"被動元件","2377":"被動元件",
+    "3035":"被動元件","2371":"被動元件","2368":"被動元件",
+    # 光學／相機
+    "3576":"光學","2351":"光學","3406":"光學","2498":"光學",
+    "3653":"光學","5269":"光學",
+    # 金融／銀行
+    "2880":"金融","2881":"金融","2882":"金融","2883":"金融",
+    "2884":"金融","2885":"金融","2886":"金融","2887":"金融",
+    "2890":"金融","2891":"金融","2892":"金融","5871":"金融",
+    "5880":"金融","2801":"金融","2812":"金融","2820":"金融",
+    # 航運
+    "2603":"航運","2609":"航運","2615":"航運","2610":"航運",
+    "2606":"航運","2618":"航運","5608":"航運","2605":"航運",
+    # 鋼鐵／原物料
+    "2002":"鋼鐵","2006":"鋼鐵","2007":"鋼鐵","2008":"鋼鐵",
+    "2015":"鋼鐵","2023":"鋼鐵","2027":"鋼鐵",
+    # 石化
+    "1301":"石化","1303":"石化","6505":"石化","1326":"石化",
+    "1312":"石化","1313":"石化",
+    # 傳產／食品
+    "1216":"食品","1101":"水泥","1102":"水泥","1722":"化工",
+    "1773":"化工","1402":"紡織","2542":"建設",
+    # 電信
+    "4904":"電信","4915":"電信","4919":"電信","3045":"電信",
+    # 生技醫療
+    "4938":"生技","4958":"生技","6414":"生技","1799":"生技",
+    "4162":"生技","4960":"生技","6547":"生技","4168":"生技",
+    # 電機／馬達
+    "1503":"電機","1504":"電機","1513":"電機","1514":"電機",
+    "1519":"電機","1605":"電機","1608":"電機","1609":"電機",
+    "1611":"電機",
+    # 上櫃半導體
+    "3661":"半導體","3163":"半導體","6146":"半導體","6150":"半導體",
+    "3227":"半導體","6185":"半導體","3264":"半導體","3324":"半導體",
+    "6208":"半導體","6217":"半導體","6223":"半導體","6231":"半導體",
+    # 上櫃網通
+    "6138":"網通伺服器","6143":"網通伺服器","6147":"網通伺服器",
+    "3680":"網通伺服器","3558":"網通伺服器","6170":"網通伺服器",
+    # 上櫃生技
+    "4107":"生技","4105":"生技","4114":"生技","4123":"生技",
+    "4128":"生技","6180":"生技","6182":"生技","6187":"生技",
+    "6188":"生技",
+    # 上櫃電子
+    "3078":"電子代工","3081":"電子代工","3105":"電子代工",
+    "3131":"電子代工","3141":"電子代工","3207":"電子代工",
+    "3211":"電子代工","3217":"電子代工","3218":"電子代工",
+    "3228":"電子代工","3234":"電子代工","3289":"電子代工",
+}
+
+
+# ── 產業位階判斷 ─────────────────────────────────────────────
+def get_industry_stage(industry_dfs: list) -> str:
+    """用同產業股票的均線結構判斷景氣位階"""
+    count = len(industry_dfs)
+    if count == 0:
+        return "未知"
+
+    above_ma20 = above_ma60 = above_ma240 = 0
+    valid = 0
+
+    for df in industry_dfs:
+        close = df["Close"].squeeze()
+        if len(close) < 60:
+            continue
+        valid += 1
+        curr  = float(close.iloc[-1])
+        ma20  = float(close.rolling(20).mean().iloc[-1])
+        ma60  = float(close.rolling(60).mean().iloc[-1])
+        if curr > ma20:  above_ma20  += 1
+        if curr > ma60:  above_ma60  += 1
+        if len(close) >= 240:
+            ma240 = float(close.rolling(240).mean().iloc[-1])
+            if curr > ma240: above_ma240 += 1
+
+    if valid == 0:
+        return "未知"
+
+    r20  = above_ma20  / valid
+    r60  = above_ma60  / valid
+    r240 = above_ma240 / valid
+
+    if r20 > 0.7 and r60 > 0.6 and r240 < 0.5:
+        return "復甦初期"
+    elif r20 > 0.7 and r60 > 0.7 and r240 > 0.6:
+        return "成長中期"
+    elif r20 < 0.5 and r60 > 0.6:
+        return "高檔成熟"
+    else:
+        return "衰退期"
+
+
 # ── 台股漲停價計算（含跳動價位）────────────────────────────────
 def calc_limit_price(prev_close: float) -> float:
     """依台股跳動價位規則計算漲停價"""
@@ -197,7 +313,7 @@ def analyze_pattern(df: pd.DataFrame, limit_days: list) -> dict:
 
 
 # ── K 線圖 HTML ──────────────────────────────────────────────
-def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, pattern):
+def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, pattern, wash_low_val=0, target_val=0, industry='', industry_stage=''):
     code   = symbol.split('.')[0]
     market = "上市" if symbol.endswith(".TW") else "上櫃"
 
@@ -264,7 +380,11 @@ def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, pat
         r['k']    = k_vals[j]
         r['d']    = d_vals[j]
 
-    data_json  = json.dumps(records, ensure_ascii=False)
+    data_json   = json.dumps(records, ensure_ascii=False)
+    ref_lines   = json.dumps({
+        "stop_loss": round(wash_low_val, 2) if wash_low_val else 0,
+        "target":    round(target_val,   2) if target_val   else 0,
+    })
     last_close = records[-1]['close'] if records else 0
     limit_count = len(limit_days)
 
@@ -342,6 +462,8 @@ def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, pat
   <div class="code">📊 {code}</div>
   <div class="name">{name}</div>
   <div class="tag">{market}</div>
+  <div class="tag">{industry}</div>
+  <div class="tag" style="color:{'#26a641' if industry_stage in ['復甦初期','成長中期'] else '#f85149' if industry_stage=='衰退期' else '#ffa500'}">{industry_stage}</div>
 </div>
 
 <!-- 狀態卡 -->
@@ -373,6 +495,10 @@ def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, pat
 </div>
 
 <!-- K 線圖 -->
+<!-- 資訊列（K 線圖上方） -->
+<div id="tip" style="margin-bottom:8px;font-size:.82rem;">
+  <span style="color:var(--muted)">← 滑鼠移到 K 線圖查看詳細資訊</span>
+</div>
 <div class="wrap">
   <div class="wrap-title">K 線圖（近兩年）</div>
   <canvas id="kc"></canvas>
@@ -405,10 +531,7 @@ def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, pat
   </div>
 </div>
 
-<!-- 資訊列（緊接在圖下方） -->
-<div id="tip" style="margin-bottom:14px;">
-  <span style="color:var(--muted)">← 滑鼠移到 K 線圖查看詳細資訊</span>
-</div>
+
 
 
 <!-- 型態分析評分卡 -->
@@ -426,7 +549,8 @@ def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, pat
 </div>
 
 <script>
-const DATA = {data_json};
+const DATA     = {data_json};
+const REF_LINES = {ref_lines};
 const DPR  = window.devicePixelRatio || 1;
 
 function setup(canvas, h) {{
@@ -552,6 +676,24 @@ function draw() {{
     if(!kdStarted){{kdc.moveTo(x,y);kdStarted=true;}}else kdc.lineTo(x,y);
   }}); kdc.stroke();
 
+  // 停損線 & 目標價線（水平參考線）
+  if(REF_LINES.stop_loss > 0){{
+    const y=py(REF_LINES.stop_loss);
+    kc.strokeStyle='#f8514988'; kc.lineWidth=1.5; kc.setLineDash([6,3]);
+    kc.beginPath(); kc.moveTo(PL,y); kc.lineTo(w-PR,y); kc.stroke();
+    kc.setLineDash([]);
+    kc.fillStyle='#f85149'; kc.font='bold 10px SF Mono,monospace'; kc.textAlign='left';
+    kc.fillText(`停損 ${{REF_LINES.stop_loss}}`,w-PR+4,y-3);
+  }}
+  if(REF_LINES.target > 0){{
+    const y=py(REF_LINES.target);
+    kc.strokeStyle='#26a64188'; kc.lineWidth=1.5; kc.setLineDash([6,3]);
+    kc.beginPath(); kc.moveTo(PL,y); kc.lineTo(w-PR,y); kc.stroke();
+    kc.setLineDash([]);
+    kc.fillStyle='#26a641'; kc.font='bold 10px SF Mono,monospace'; kc.textAlign='left';
+    kc.fillText(`目標 ${{REF_LINES.target}}`,w-PR+4,y-3);
+  }}
+
   // KD 黃金交叉標記
   for(let i=1;i<DATA.length;i++){{
     const prev=DATA[i-1], cur=DATA[i];
@@ -586,12 +728,14 @@ function draw() {{
     const col=d.limit?'#ffa500':(d.close>=d.open?'#26a641':'#f85149');
     const chg=((d.close-d.open)/d.open*100).toFixed(2);
 
-    // 游標直線（重繪 K 線後疊加）
+    // 游標直線（重繪後疊加，三圖同步）
     draw();
     const cx=PL+i*gap+gap/2;
-    kc.strokeStyle='rgba(255,255,255,0.25)'; kc.lineWidth=1; kc.setLineDash([4,3]);
-    kc.beginPath(); kc.moveTo(cx,PT); kc.lineTo(cx,kh-PB); kc.stroke();
-    kc.setLineDash([]);
+    [{{ctx:kc,h:kh,pt:PT,pb:PB}},{{ctx:vc,h:vh,pt:0,pb:0}},{{ctx:kdc,h:kdh,pt:0,pb:0}}].forEach(c=>{{
+      c.ctx.strokeStyle='rgba(255,255,255,0.2)'; c.ctx.lineWidth=1; c.ctx.setLineDash([4,3]);
+      c.ctx.beginPath(); c.ctx.moveTo(cx,c.pt); c.ctx.lineTo(cx,c.h-c.pb); c.ctx.stroke();
+      c.ctx.setLineDash([]);
+    }});
 
     tip.innerHTML=
       `<span style="color:var(--muted)">${{d.date}}</span>` +
@@ -625,39 +769,44 @@ window.addEventListener('resize',draw);
 
 
 # ── 股票清單 ─────────────────────────────────────────────────
-def get_list():
-    tw = [
-        "1101","1102","1216","1301","1303","1402","1503","1504","1513","1514",
-        "1519","1605","1608","1609","1611","1722","1773","2002","2006","2301",
-        "2303","2308","2313","2317","2324","2327","2330","2337","2344","2352",
-        "2353","2356","2357","2360","2367","2368","2371","2376","2377","2379",
-        "2382","2383","2385","2395","2408","2409","2412","2449","2451","2454",
-        "2458","2474","2498","2542","2603","2606","2609","2610","2615","2618",
-        "2880","2881","2882","2883","2884","2885","2886","2887","2890","2891",
-        "2892","3005","3008","3017","3019","3023","3034","3035","3037","3044",
-        "3045","3231","3406","3443","3481","3576","3653","3661","3702","3711",
-        "4904","4915","4919","4938","4958","5269","5871","5880","6239","6278",
-        "6414","6415","6505","6669","8046"
-    ]
-    two = [
-        "1560","1580","1590","1785","1795","1815","2233","3068","3078","3081",
-        "3105","3131","3141","3163","3207","3211","3217","3218","3227","3228",
-        "3234","3260","3264","3289","3293","3324","3363","3376","3455","3491",
-        "3511","3526","3529","3546","3548","3558","3580","3587","3592","3611",
-        "3624","3664","3680","4105","4107","4114","4123","4128","4162","4303",
-        "4510","4513","4528","4533","4541","4721","4736","4743","4760","4908",
-        "4909","4931","4944","4953","4966","4979","5009","5211","5227","5274",
-        "5289","5309","5347","5351","5371","5381","5425","5439","5443","5457",
-        "5478","5483","5512","6104","6111","6121","6125","6138","6143","6146",
-        "6147","6150","6170","6173","6180","6182","6185","6187","6188","6208",
-        "6217","6219","6223","6231","6233","6237","6244","6245","6261","6266",
-        "6274","6275","6276","6279","6284","6290","6411","6417","6418","6435",
-        "6441","6446","6462","6472","6485","6488","6496","6510","6532","6548",
-        "6561","6568","6589","6613","6643","6654","6679","6683","6732","6741",
-        "8027","8044","8054","8064","8069","8076","8085","8086","8091","8096",
-        "8111","8155","8255","8299","8358","8415","8436","8916","8936","8938"
-    ]
-    return [f"{c}.TW" for c in tw] + [f"{c}.TWO" for c in two]
+def get_list(target=750):
+    """從 TWSE/TPEX OpenAPI 自動抓全市場清單，過濾後取前 target 支"""
+    tw_codes  = []
+    two_codes = []
+
+    try:
+        r = requests.get(
+            "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL",
+            timeout=15)
+        for item in r.json():
+            code = item.get("Code", "")
+            # 只取純數字4碼（排除ETF、權證等）
+            if code.isdigit() and len(code) == 4:
+                tw_codes.append(code)
+        print(f"[清單] 上市取得 {len(tw_codes)} 支")
+    except Exception as e:
+        print(f"[清單] 上市 API 失敗：{e}")
+
+    try:
+        r = requests.get(
+            "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes",
+            timeout=15)
+        for item in r.json():
+            code = item.get("SecuritiesCompanyCode", "")
+            if code.isdigit() and len(code) == 4:
+                two_codes.append(code)
+        print(f"[清單] 上櫃取得 {len(two_codes)} 支")
+    except Exception as e:
+        print(f"[清單] 上櫃 API 失敗：{e}")
+
+    # 上市取前 450，上櫃取前 300，合計約 750
+    tw_codes  = tw_codes[:450]
+    two_codes = two_codes[:300]
+
+    result = [f"{c}.TW"  for c in tw_codes] +              [f"{c}.TWO" for c in two_codes]
+
+    print(f"[清單] 合計 {len(result)} 支納入掃描")
+    return result
 
 
 # ── 掃描主函式 ───────────────────────────────────────────────
@@ -673,6 +822,31 @@ def scan(output_dir="charts", base_url="charts"):
     fetch_end   = today
     results     = []
     total       = len(stocks)
+
+    # ── 建立產業資料池（修改2）─────────────────────────────────
+    print("[產業] 建立產業資料池...")
+    industry_data = {}
+    for s in stocks:
+        code = s.split('.')[0]
+        ind  = industry_map.get(code)
+        if not ind:
+            continue
+        try:
+            df_ind = yf.download(s, start=fetch_start, end=fetch_end, progress=False)
+            if df_ind.empty or len(df_ind) < 60:
+                continue
+            if isinstance(df_ind.columns, pd.MultiIndex):
+                df_ind.columns = df_ind.columns.get_level_values(0)
+            industry_data.setdefault(ind, []).append(df_ind)
+        except Exception:
+            continue
+    print(f"[產業] 完成，涵蓋 {len(industry_data)} 個產業")
+
+    # 預先計算各產業位階
+    industry_stage_cache = {
+        ind: get_industry_stage(dfs)
+        for ind, dfs in industry_data.items()
+    }
 
     print(f"[掃描] 共 {total} 支，條件：前 3~10 交易日首次漲停 + 縮量洗盤 + 型態分析")
 
@@ -781,6 +955,10 @@ def scan(output_dir="charts", base_url="charts"):
             code   = s.split('.')[0]
             market = "上市" if s.endswith(".TW") else "上櫃"
             name   = name_map.get(code, "")
+
+            # 修改1：產業分類與位階
+            industry       = industry_map.get(code, '其他')
+            industry_stage = industry_stage_cache.get(industry, '未知')
 
             wash_info = {
                 "vol_ratio":    vol_ratio_pct,
@@ -912,7 +1090,14 @@ def scan(output_dir="charts", base_url="charts"):
 
             pattern['notes'] = extra_notes + pattern['notes']
 
-            # 重新計算評分等級（滿分約 197 分）
+            # 修改4：產業位階加減分
+            stage_bonus = {"復甦初期": 20, "成長中期": 10, "高檔成熟": -10, "衰退期": -20}.get(industry_stage, 0)
+            if stage_bonus != 0:
+                pattern['score'] += stage_bonus
+                stage_emoji = "✅" if stage_bonus > 0 else "❌"
+                pattern['notes'].insert(0, f"{stage_emoji} 產業位階：{industry_stage}（{'+' if stage_bonus>0 else ''}{stage_bonus} 分）")
+
+            # 重新計算評分等級（滿分約 217 分）
             ps = pattern['score']
             pattern['grade'] = "🔥🔥 極強" if ps >= 140 else "🔥 強" if ps >= 100 else "⚠️ 普通" if ps >= 60 else "❌ 弱"
 
@@ -959,10 +1144,45 @@ def scan(output_dir="charts", base_url="charts"):
             with open(chart_file, "w", encoding="utf-8") as f:
                 f.write(generate_chart_html(
                     s, name, df, list(limit_days),
-                    is_washing, wash_info, pattern
+                    is_washing, wash_info, pattern,
+                    wash_low_val=wash_low if wash_low else 0,
+                    target_val=float(target_price) if isinstance(target_price, float) else 0,
+                    industry=industry,
+                    industry_stage=industry_stage
                 ))
 
-            dates = [d.strftime('%m/%d') for d in limit_days]
+            # KD 共振計算
+            try:
+                kd_series = []
+                prev_k2, prev_d2 = 50.0, 50.0
+                for j in range(len(close)):
+                    if j < 8:
+                        kd_series.append((None, None))
+                        continue
+                    hh = float(df['High'].iloc[j-8:j+1].max())
+                    ll = float(df['Low'].iloc[j-8:j+1].min())
+                    rsv = ((float(close.iloc[j]) - ll) / (hh - ll) * 100) if hh != ll else 50.0
+                    k2  = prev_k2 * 2/3 + rsv * 1/3
+                    d2  = prev_d2 * 2/3 + k2  * 1/3
+                    kd_series.append((round(k2, 1), round(d2, 1)))
+                    prev_k2, prev_d2 = k2, d2
+                if len(kd_series) >= 2:
+                    pk, pd_v = kd_series[-2]
+                    ck, cd   = kd_series[-1]
+                    kd_golden = (pk is not None and pd_v is not None and
+                                 ck is not None and cd  is not None and
+                                 pk <= pd_v and ck > cd)
+                else:
+                    kd_golden = False
+            except Exception:
+                kd_golden = False
+
+            is_entry     = (is_breakout and breakout_vol_ratio >= 0.5 and
+                            pattern['score'] >= 100 and curr_price > wash_high * 1.01) if is_breakout and wash_high else False
+            kd_resonance = is_entry and kd_golden
+            entry_str    = ("⭐ 共振進場" if kd_resonance else "✅ 進場") if is_entry else "-"
+            target_price = round(wash_high * 1.15, 2) if (is_breakout and wash_high) else "-"
+
             results.append({
                 "_score":    pattern['score'],
                 "_vol_num":  float(vol_ratio_pct.rstrip('%')),
@@ -973,6 +1193,8 @@ def scan(output_dir="charts", base_url="charts"):
                 ),
                 "名稱":      name,
                 "市場":      market,
+                "產業":      industry,
+                "產業位階":   f"<span style='color:{{'#26a641' if industry_stage in ['復甓初期','成長中期'] else '#f85149' if industry_stage in ['衰退期'] else '#ffa500'}}'>{industry_stage}</span>",
                 "型態評分":   f"<span style='color:{'#26a641' if pattern['score']>=70 else '#ffa500' if pattern['score']>=50 else '#f85149'};font-weight:700'>{pattern['score']} 分 {pattern['grade']}</span>",
                 "洗盤量比":   vol_ratio_pct,
                 "距漲停天數": days_since,
@@ -980,7 +1202,8 @@ def scan(output_dir="charts", base_url="charts"):
                 "收盤價":    round(curr_price, 2),
                 "漲停軌跡":   " / ".join(dates),
                 "突破洗盤":    breakout_str,
-                "進場訊號":    "✅ 進場" if (is_breakout and breakout_vol_ratio >= 0.5 and pattern['score'] >= 100) else "-",
+                "進場訊號":    entry_str,
+                "目標價":      target_price,
                 "停損參考":    round(wash_low, 2) if wash_low else "-",
             })
 
