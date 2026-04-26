@@ -394,8 +394,8 @@ def backtest_strategy(df: pd.DataFrame, horizons=(5, 10, 20)) -> dict:
 
             last_limit_i = limit_candidates[-1]
 
-            # 近63交易日首次漲停
-            start_check = max(1, last_limit_i - 63)
+            # 近30交易日首次漲停（放寬：63→30）
+            start_check = max(1, last_limit_i - 30)
             prior_limit = any(
                 calc_limit_price(float(close.iloc[j-1])) * 0.999 <= float(close.iloc[j])
                 for j in range(start_check, last_limit_i)
@@ -1258,7 +1258,7 @@ setRange(120);   // 預設顯示近 6 個月
 
 
 # ── 股票清單 ─────────────────────────────────────────────────
-def get_list(target=1200):
+def get_list(target=2000):
     tw_codes  = []
     two_codes = []
 
@@ -1416,7 +1416,7 @@ def scan(output_dir="charts", base_url="charts"):
         market_warn = 0
         print("[大盤] ❓ 大盤狀態無法確認，不調整評分")
 
-    print(f"[掃描] 共 {total} 支，雙名單：A觀察名單（1~15交易日整理）+ B二波確認（最後交易日再漲停）")
+    print(f"[掃描] 共 {total} 支，雙名單：A觀察名單（1~23交易日整理）+ B二波確認（最後交易日再漲停）")
 
     # 淘汰原因統計
     reject = {}
@@ -1499,7 +1499,7 @@ def scan(output_dir="charts", base_url="charts"):
             first_limit_price_val = None
             first_limit_close_val = None
 
-            search_range = range(2, 18)   # 放寬：支援整理最多15天（週末邊界保留）
+            search_range = range(2, 26)   # 放寬：支援整理最多23天（搜尋更多歷史）
             for offset in search_range:
                 candidate_iloc = today_iloc - offset
                 if candidate_iloc <= 0:
@@ -1520,14 +1520,12 @@ def scan(output_dir="charts", base_url="charts"):
             if first_limit_date is None:
                 mark("找不到首次漲停"); continue
 
-            # ── 近三個月內首次漲停（63 個交易日）────────────────────
-            # 用 iloc 往前找 63 個交易日，不用 calendar DateOffset
-            first_limit_iloc_in_all = first_limit_iloc   # 已是 trading_days 的 iloc
-            lookback_start_iloc = max(0, first_limit_iloc - 63)
+            # ── 近30個交易日內首次漲停（放寬：63→30）────────────────
+            lookback_start_iloc = max(0, first_limit_iloc - 30)
             prior_limits = [d for d in all_limit_close
                             if trading_days[lookback_start_iloc] <= d < first_limit_date]
             if prior_limits:
-                mark("近63日有前例漲停"); continue
+                mark("近30交易日有前例漲停"); continue
 
             # ── 整理天數（首漲停後到今日前，不含今日）───────────────
             # BUG-07：下限改成 1，週末執行時最後交易日可能整理僅1天
@@ -1539,7 +1537,7 @@ def scan(output_dir="charts", base_url="charts"):
 
             # ── 判斷名單類型 ──────────────────────────────────────────
             is_list_b = today_is_limit and wash_days_count <= 6
-            is_list_a = not today_is_limit and wash_days_count <= 15   # 放寬：10→15交易日
+            is_list_a = not today_is_limit and wash_days_count <= 23   # 放寬：15→23交易日
 
             if not is_list_a and not is_list_b:
                 mark("整理天數超過上限"); continue
@@ -1570,20 +1568,20 @@ def scan(output_dir="charts", base_url="charts"):
             shrink = avg_wash_vol_val < limit_vol * 0.80
 
             # FIX-11：整理期破底兩層判斷
-            #   第一層：盤中最多容忍跌破 3%（超過代表籌碼鬆動）
-            if wash_lows_day and wash_period_low < limit_low * 0.97:
-                mark("盤中破底超過3%"); continue
+            #   第一層：盤中最多容忍跌破 5%（放寬：3%→5%）
+            if wash_lows_day and wash_period_low < limit_low * 0.95:
+                mark("盤中破底超過5%"); continue
             #   第二層：整理期每天收盤不能跌破首漲停最低價 × 98%（放寬2%緩衝）
             if wash_closes and any(wc < limit_low * 0.98 for wc in wash_closes):
                 mark("整理期收盤破低點(>2%)"); continue
             if today_close < limit_low * 0.98:
                 mark("最後交易日收盤破低點(>2%)"); continue
 
-            # FIX-03：整理震盪幅度 > 15% 代表主力未控盤，淘汰
+            # FIX-03：整理震盪幅度 > 20% 代表主力未控盤（放寬：15%→20%）
             if wash_highs_day and wash_lows_day and limit_low > 0:
                 volatility = (wash_period_high - wash_period_low) / limit_low
-                if volatility > 0.15:
-                    mark("震盪幅度>15%"); continue
+                if volatility > 0.20:
+                    mark("震盪幅度>20%"); continue
 
             # FIX-13：流動性濾網（冷門股跳過，隔天進出困難）
             avg20_vol    = float(close.rolling(20).count().iloc[-1])   # placeholder先用count
@@ -1627,8 +1625,9 @@ def scan(output_dir="charts", base_url="charts"):
                 # A3：BUG-01修正 — 整理期平均量 < 首波70%（放寬，不逐天卡死）
                 #     wash_closes 為空（整理1天且今日就是整理日）時跳過此條
                 avg_wash_vol = sum(wash_vols) / len(wash_vols) if wash_vols else 0
+                # 量縮不足改成扣分警示，不再淘汰
                 if avg_wash_vol > 0 and avg_wash_vol >= limit_vol * 0.90:
-                    mark("A量縮不足(均量>=90%)"); continue   # 放寬：0.70→0.90
+                    pass   # 由評分加分機制處理，不做 continue
 
                 # A4：整理期收盤不破首漲停最低價 × 98%（與共用條件一致）
                 if wash_closes and not all(wc >= limit_low * 0.98 for wc in wash_closes):
@@ -1654,6 +1653,10 @@ def scan(output_dir="charts", base_url="charts"):
                         continue
                 if wash_second_limit:
                     mark("A整理期已有二波漲停"); continue
+
+                # 防止追高：收盤已超過整理高點3%，代表可能變接盤
+                if wash_high_close > 0 and today_close > wash_high_close * 1.03:
+                    mark("已超整理高點3%(追高風險)"); continue
 
                 # ── 三層分級（名單A）────────────────────────────────
                 is_confirmed  = today_close > wash_high_close
@@ -1785,7 +1788,7 @@ def scan(output_dir="charts", base_url="charts"):
                 wash_score_notes.append(f"⚠️ 最後交易日量偏大（首波 {vol_pct_of_limit}%），需觀察是否出貨")
 
             # ── 整理均價與漲停價偏離度（越貼越強）───────────────────
-            avg_wash_close = sum(wash_close_list) / len(wash_close_list)
+            avg_wash_close = sum(wash_closes) / len(wash_closes) if wash_closes else today_close
             deviation_pct  = abs(avg_wash_close - first_limit_price_val) / first_limit_price_val * 100
             if deviation_pct <= 1.5:
                 pattern['score'] += 20
@@ -2012,6 +2015,33 @@ def scan(output_dir="charts", base_url="charts"):
             if kd_golden:
                 order_note += "｜KD黃金交叉共振"
 
+            # ── 三分法操作標籤（統一邏輯）───────────────────────────
+            def _classify_trade(score, _above_ma, _hold_low, _shrink, _stage):
+                """
+                可掛單：評分≥70 + 站上MA20 + 守低點 + 縮量 + 產業非衰退
+                剔除：跌破低點 / 跌破MA20 / 爆量未突破 / 產業衰退
+                觀察：其餘
+                """
+                if not _above_ma or not _hold_low:
+                    return "❌ 剔除", 3
+                if _stage == "衰退期":
+                    return "❌ 剔除", 3
+                if today_vol_ratio > 0.9 and today_close < wash_high_close:
+                    return "❌ 剔除", 3   # 爆量未突破
+                if score >= 70 and _above_ma and _hold_low and _shrink and _stage not in ("衰退期",):
+                    return "✅ 可掛單", 1
+                return "👀 觀察", 2
+
+            _hold_low_flag = today_close >= limit_low * 0.98
+
+            if list_type == "B":
+                action_label = "🔥 二波確認"
+                action_key   = 0
+            else:
+                action_label, action_key = _classify_trade(
+                    pattern['score'], above_ma, _hold_low_flag, shrink, industry_stage
+                )
+
             dates = [d.strftime('%m/%d') for d in limit_days]
             stage_color = '#26a641' if industry_stage in ['復甦初期', '成長中期'] else '#f85149' if industry_stage == '衰退期' else '#ffa500'
 
@@ -2038,9 +2068,9 @@ def scan(output_dir="charts", base_url="charts"):
                 ))
 
             results.append({
-                "_score":    pattern['score'],
-                "_tier_key": tier_key,
-                "_vol_num":  float(vol_ratio_pct.rstrip('%')) if vol_ratio_pct != '-' else 0,
+                "_score":      pattern['score'],
+                "_tier_key":   action_key,
+                "_vol_num":    float(vol_ratio_pct.rstrip('%')) if vol_ratio_pct != '-' else 0,
                 "代碼": (
                     f"<a href='{chart_link}' target='_blank' "
                     f"style='color:#58a6ff;font-weight:700;text-decoration:none'>"
@@ -2049,6 +2079,7 @@ def scan(output_dir="charts", base_url="charts"):
                 "名稱":       name,
                 "市場":       market,
                 "名單":       "🔥二波確認" if list_type=="B" else "📋觀察名單",
+                "操作":       action_label,
                 "分級":       list_a_grade,
                 "產業":       industry,
                 "產業位階":    f"<span style='color:{stage_color}'>{industry_stage}</span>",
@@ -2099,30 +2130,30 @@ def to_html(df, output_file="index.html", market_status=None):
         sort_asc  = [True, False, True]
         drop_cols = ['_score', '_tier_key', '_vol_num']
 
-        df_fire   = df[df['狀態分層'].str.startswith('🔥')].sort_values(sort_cols, ascending=sort_asc).drop(columns=drop_cols)
-        df_green  = df[df['狀態分層'].str.startswith('🟢')].sort_values(sort_cols, ascending=sort_asc).drop(columns=drop_cols)
-        df_red    = df[df['狀態分層'].str.startswith('🔴')].sort_values(sort_cols, ascending=sort_asc).drop(columns=drop_cols)
-        df_yellow = df[df['狀態分層'].str.startswith('🟡')].sort_values(sort_cols, ascending=sort_asc).drop(columns=drop_cols)
+        df_fire   = df[df['操作'] == '🔥 二波確認'].sort_values(sort_cols, ascending=sort_asc).drop(columns=drop_cols)
+        df_buy    = df[df['操作'] == '✅ 可掛單'].sort_values(sort_cols, ascending=sort_asc).drop(columns=drop_cols)
+        df_watch  = df[df['操作'] == '👀 觀察'].sort_values(sort_cols, ascending=sort_asc).drop(columns=drop_cols)
+        df_reject = df[df['操作'] == '❌ 剔除'].sort_values(sort_cols, ascending=sort_asc).drop(columns=drop_cols)
 
         def tbl(d): return d.to_html(index=False, escape=False) if not d.empty else "<p style='color:var(--muted);padding:12px'>目前無符合標的</p>"
 
         table_html = (
             "<h2 style='color:#d93025;font-size:1.1rem;margin:20px 0 10px'>"
-            "🔥 二波確認名單（今日再度漲停，明日回測不破進場）</h2>" + tbl(df_fire) +
+            "🔥 二波確認（最後交易日再度漲停，明日回測不破進場）</h2>" + tbl(df_fire) +
             "<h2 style='color:#26a641;font-size:1.1rem;margin:28px 0 10px'>"
-            "🟢 靠近突破（整理高點附近，明日可突破掛單）</h2>" + tbl(df_green) +
+            "✅ 可掛單（評分≥100、守位、縮量、產業非衰退）</h2>" + tbl(df_buy) +
             "<h2 style='color:#ffa500;font-size:1.1rem;margin:28px 0 10px'>"
-            "🔴 卡位觀察（量縮守位，靠近 97% 可試單）</h2>" + tbl(df_red) +
+            "👀 觀察（型態可，但量能或產業普通）</h2>" + tbl(df_watch) +
             "<h2 style='color:#8b949e;font-size:1.1rem;margin:28px 0 10px'>"
-            "🟡 整理中（等待靠近突破位再動）</h2>" + tbl(df_yellow)
+            "❌ 剔除（跌破低點、爆量未突破、產業衰退）</h2>" + tbl(df_reject)
         )
         count_info = (
             f"<p class='count'>"
             f"本次掃描共 <strong style='color:#d93025'>{len(df)}</strong> 支符合條件｜"
             f"<strong style='color:#d93025'>🔥 二波確認 {len(df_fire)} 支</strong>・"
-            f"<strong style='color:#26a641'>🟢 靠近突破 {len(df_green)} 支</strong>・"
-            f"<strong style='color:#ffa500'>🔴 卡位 {len(df_red)} 支</strong>・"
-            f"<strong style='color:#8b949e'>🟡 整理 {len(df_yellow)} 支</strong>"
+            f"<strong style='color:#26a641'>✅ 可掛單 {len(df_buy)} 支</strong>・"
+            f"<strong style='color:#ffa500'>👀 觀察 {len(df_watch)} 支</strong>・"
+            f"<strong style='color:#8b949e'>❌ 剔除 {len(df_reject)} 支</strong>"
             f"&nbsp;｜&nbsp; 點擊代碼查看 K 線圖</p>"
         )
     else:
@@ -2189,9 +2220,9 @@ def to_html(df, output_file="index.html", market_status=None):
   {count_info}
   <div class="hint">
     <b>💡 選股邏輯（兩張名單）</b><br>
-    📋 <b>觀察名單</b>：首漲停後整理 1~15 個交易日，收盤在漲停價 ±8% 內，整理均量 &lt; 首波70%，守住漲停日最低價，尚未二波（MA5 為加分項）<br>
+    📋 <b>觀察名單</b>：首漲停後整理 1~23 個交易日，收盤在漲停價 ±8% 內，整理均量 &lt; 首波70%，守住漲停日最低價，尚未二波（MA5 為加分項）<br>
     🔥 <b>二波確認</b>：首漲停後整理 1~6 個交易日，收盤在漲停價 ±5% 內，最後交易日再度漲停（事後確認）<br>
-    四層輸出：🔥 二波確認 ／ 🟢 靠近突破 ／ 🔴 卡位觀察 ／ 🟡 整理中<br>
+    操作分類：🔥 二波確認 ／ ✅ 可掛單 ／ 👀 觀察 ／ ❌ 剔除<br>
     分級：A+ 量縮嚴格＋多頭排列＋成長產業 ／ A 量縮守位 ／ B 基本通過<br>
     雙停損：積極停損=整理低點 ／ 防守停損=首漲停最低價<br>
     ⚡ 操作：🔥回測不破進 ／ 🟢突破掛單 ／ 🔴卡位試單 ／ 🟡繼續等
