@@ -81,14 +81,37 @@ industry_map = {
 }
 
 
-# ── 產業位階判斷 ─────────────────────────────────────────────
-def get_industry_stage(industry_dfs: list) -> str:
+# ── 龍頭股對照表（FIX-20）────────────────────────────────────
+INDUSTRY_LEADERS = {
+    "半導體":    "2330",
+    "金融":      "2882",
+    "航運":      "2603",
+    "鋼鐵":      "2002",
+    "石化":      "6505",
+    "網通伺服器": "2308",
+    "電子代工":   "2317",
+}
+
+
+# ── 產業位階判斷（FIX-17~21 強化版）─────────────────────────
+def get_industry_stage(industry_dfs: list, industry_name: str = "") -> str:
+    """
+    FIX-17：樣本 < 5 回傳「樣本不足」
+    FIX-18：加入廣度斜率（速度）判斷
+    FIX-19：r20 > 0.85 視為「高檔過熱」
+    FIX-20：龍頭股跌破 MA20 強制降一級
+    FIX-21：門檻依產業樣本數動態調整
+    """
     if not industry_dfs:
         return "未知"
 
+    # FIX-17：樣本不足直接回傳
+    if len(industry_dfs) < 5:
+        return "樣本不足"
+
     above_ma20 = above_ma60 = above_ma240 = 0
-    valid60 = 0
-    valid240 = 0
+    above_ma20_prev = 0   # FIX-18：10日前的廣度
+    valid60 = valid240 = valid_prev = 0
 
     for df in industry_dfs:
         try:
@@ -96,41 +119,77 @@ def get_industry_stage(industry_dfs: list) -> str:
             if not isinstance(close, pd.Series) or len(close) < 60:
                 continue
 
-            curr = float(close.iloc[-1])
-            ma20 = float(close.rolling(20).mean().iloc[-1])
-            ma60 = float(close.rolling(60).mean().iloc[-1])
+            curr  = float(close.iloc[-1])
+            ma20  = float(close.rolling(20).mean().iloc[-1])
+            ma60  = float(close.rolling(60).mean().iloc[-1])
 
             valid60 += 1
-            if curr > ma20:
-                above_ma20 += 1
-            if curr > ma60:
-                above_ma60 += 1
+            if curr > ma20: above_ma20 += 1
+            if curr > ma60: above_ma60 += 1
+
+            # FIX-18：10日前收盤 vs 當時MA20
+            if len(close) >= 30:
+                prev_close = float(close.iloc[-11])
+                prev_ma20  = float(close.rolling(20).mean().iloc[-11])
+                valid_prev += 1
+                if prev_close > prev_ma20: above_ma20_prev += 1
 
             if len(close) >= 240:
                 ma240 = float(close.rolling(240).mean().iloc[-1])
                 valid240 += 1
-                if curr > ma240:
-                    above_ma240 += 1
+                if curr > ma240: above_ma240 += 1
         except Exception:
             continue
 
     if valid60 == 0:
         return "未知"
 
-    r20 = above_ma20 / valid60
-    r60 = above_ma60 / valid60
+    r20  = above_ma20 / valid60
+    r60  = above_ma60 / valid60
     r240 = above_ma240 / valid240 if valid240 > 0 else None
 
-    if r20 >= 0.65 and r60 >= 0.55 and (r240 is None or r240 < 0.55):
-        return "復甦初期"
-    if r20 >= 0.65 and r60 >= 0.65 and (r240 is None or r240 >= 0.55):
-        return "成長中期"
-    if r20 < 0.50 and r60 >= 0.55:
-        return "高檔成熟"
-    if r20 < 0.45 and r60 < 0.45:
-        return "衰退期"
+    # FIX-18：廣度斜率
+    r20_prev = above_ma20_prev / valid_prev if valid_prev > 0 else r20
+    slope    = r20 - r20_prev   # 正 = 改善中，負 = 惡化中
 
-    return "盤整過渡"
+    # FIX-21：動態門檻（依樣本數）
+    n = valid60
+    if n >= 20:
+        t_hi, t_mid, t_lo = 0.65, 0.55, 0.45
+    elif n >= 10:
+        t_hi, t_mid, t_lo = 0.60, 0.50, 0.40
+    else:
+        t_hi, t_mid, t_lo = 0.55, 0.45, 0.35
+
+    # FIX-19：超買過熱判斷（優先）
+    if r20 > 0.85:
+        stage = "高檔過熱"
+
+    # 正常廣度判斷
+    elif r20 >= t_hi and r60 >= t_hi and (r240 is None or r240 >= t_mid):
+        stage = "成長中期"
+    elif r20 >= t_hi and r60 >= t_mid and (r240 is None or r240 < t_mid):
+        stage = "復甦初期"
+    elif r20 < 0.50 and r60 >= t_mid:
+        stage = "高檔成熟"
+    elif r20 < t_lo and r60 < t_lo:
+        stage = "衰退期"
+    else:
+        stage = "盤整過渡"
+
+    # FIX-18：斜率修正（快速惡化降一級、快速復甦升一級）
+    stage_order = ["衰退期", "盤整過渡", "高檔成熟", "復甦初期", "成長中期", "高檔過熱"]
+    if slope < -0.15 and stage in stage_order:
+        idx = stage_order.index(stage)
+        if idx > 0:
+            stage = stage_order[idx - 1]
+    elif slope > 0.15 and stage in stage_order:
+        idx = stage_order.index(stage)
+        # 最多升到「成長中期」，不自動升到「高檔過熱」
+        if idx < stage_order.index("成長中期"):
+            stage = stage_order[idx + 1]
+
+    return stage
 
 
 # ── 官方產業分類抓取 ─────────────────────────────────────────
@@ -282,6 +341,12 @@ def _forward_return_and_drawdown(close: pd.Series, signal_pos: int, horizon: int
 
 
 def backtest_strategy(df: pd.DataFrame, horizons=(5, 10, 20)) -> dict:
+    """
+    FIX-12：回測改成隔日掛單模擬。
+    掛單價 = 整理期最高收盤 × 1.005
+    隔天 low ≤ 掛單價 ≤ 隔天 high → 視為成交
+    未觸及掛單價的訊號不計入回測，更貼近實際操作。
+    """
     empty = {
         "samples": 0,
         "win_5": None, "avg_5": None,
@@ -293,28 +358,30 @@ def backtest_strategy(df: pd.DataFrame, horizons=(5, 10, 20)) -> dict:
         if df.empty or len(df) < 90:
             return empty
 
-        close = df["Close"].squeeze().astype(float)
+        close  = df["Close"].squeeze().astype(float)
         volume = df["Volume"].squeeze().astype(float)
-        open_ = df["Open"].squeeze().astype(float)
+        high   = df["High"].squeeze().astype(float)
+        low    = df["Low"].squeeze().astype(float)
 
         if not isinstance(close, pd.Series) or len(close) < 90:
             return empty
 
-        signal_positions = []
-        max_horizon = max(horizons)
-        rolling_ma20 = close.rolling(20).mean()
+        signal_positions = []   # (signal_i, entry_price)
+        max_horizon      = max(horizons)
+        rolling_ma20     = close.rolling(20).mean()
 
-        for cur_i in range(70, len(close) - max_horizon):
+        for cur_i in range(70, len(close) - max_horizon - 1):
             lo = max(1, cur_i - 10)
-            hi = max(1, cur_i - 3)
+            hi = max(1, cur_i - 2)
             if lo >= hi:
                 continue
 
+            # 找首次漲停
             limit_candidates = []
             for j in range(lo, hi):
                 try:
-                    limit_price = calc_limit_price(float(close.iloc[j - 1]))
-                    if float(close.iloc[j]) >= limit_price * 0.999:
+                    lp = calc_limit_price(float(close.iloc[j - 1]))
+                    if float(close.iloc[j]) >= lp * 0.999:
                         limit_candidates.append(j)
                 except Exception:
                     continue
@@ -324,42 +391,49 @@ def backtest_strategy(df: pd.DataFrame, horizons=(5, 10, 20)) -> dict:
 
             last_limit_i = limit_candidates[-1]
 
+            # 近63交易日首次漲停
             start_check = max(1, last_limit_i - 63)
-            prior_limit = False
-            for j in range(start_check, last_limit_i):
-                try:
-                    limit_price = calc_limit_price(float(close.iloc[j - 1]))
-                    if float(close.iloc[j]) >= limit_price * 0.999:
-                        prior_limit = True
-                        break
-                except Exception:
-                    continue
+            prior_limit = any(
+                calc_limit_price(float(close.iloc[j-1])) * 0.999 <= float(close.iloc[j])
+                for j in range(start_check, last_limit_i)
+                if j > 0
+            )
             if prior_limit:
                 continue
 
-            limit_vol = float(volume.iloc[last_limit_i])
-            limit_low = float(open_.iloc[last_limit_i])
+            limit_vol  = float(volume.iloc[last_limit_i])
+            limit_low  = float(low.iloc[last_limit_i])      # FIX-03：用最低價
             curr_price = float(close.iloc[cur_i])
-            curr_vol = float(volume.iloc[cur_i])
-            ma20 = float(rolling_ma20.iloc[cur_i])
+            curr_vol   = float(volume.iloc[cur_i])
+            ma20_val   = float(rolling_ma20.iloc[cur_i])
 
-            if limit_vol <= 0 or pd.isna(ma20):
+            if limit_vol <= 0 or pd.isna(ma20_val):
                 continue
 
+            # FIX-01：洗盤三條件
             shrink   = curr_vol < limit_vol * 0.5
             hold_low = curr_price >= limit_low
-            above_ma = curr_price > ma20
-
-            # FIX-01：洗盤本質 = 縮量 + 不破低 + 趨勢仍在，移除「放量上漲也算」
-            is_washing = shrink and hold_low and above_ma
-            if not is_washing:
+            above_ma = curr_price > ma20_val
+            if not (shrink and hold_low and above_ma):
                 continue
 
-            # FIX-06：訊號去重，同一檔10個交易日內不重複計
-            if signal_positions and cur_i - signal_positions[-1] < 10:
+            # FIX-06：訊號去重
+            if signal_positions and cur_i - signal_positions[-1][0] < 10:
                 continue
 
-            signal_positions.append(cur_i)
+            # FIX-12：計算掛單價，判斷隔天是否成交
+            wash_closes_bt = [float(close.iloc[j]) for j in range(last_limit_i + 1, cur_i + 1)]
+            wash_high_c    = max(wash_closes_bt) if wash_closes_bt else curr_price
+            entry_price    = round(wash_high_c * 1.005, 2)
+
+            next_i     = cur_i + 1
+            next_low   = float(low.iloc[next_i])
+            next_high  = float(high.iloc[next_i])
+
+            if not (next_low <= entry_price <= next_high):
+                continue   # 掛單未成交，不計入
+
+            signal_positions.append((cur_i, entry_price))
 
         if not signal_positions:
             return empty
@@ -367,14 +441,21 @@ def backtest_strategy(df: pd.DataFrame, horizons=(5, 10, 20)) -> dict:
         result = {"samples": len(signal_positions)}
 
         for h in horizons:
-            returns = []
+            returns   = []
             drawdowns = []
-            for pos in signal_positions:
-                r, dd = _forward_return_and_drawdown(close, pos, h)
-                if r is not None:
-                    returns.append(r)
-                if dd is not None:
-                    drawdowns.append(dd)
+            for (pos, ep) in signal_positions:
+                end_i = pos + 1 + h   # 進場隔天算起 h 天後
+                if end_i >= len(close):
+                    continue
+                if ep <= 0:
+                    continue
+                future = close.iloc[pos + 2: end_i + 1].astype(float)
+                if future.empty:
+                    continue
+                ret = float(close.iloc[end_i]) / ep - 1
+                mdd = float(future.min()) / ep - 1
+                returns.append(ret)
+                drawdowns.append(mdd)
 
             if returns:
                 result[f"win_{h}"] = sum(1 for r in returns if r > 0) / len(returns)
@@ -1176,7 +1257,7 @@ setRange(120);   // 預設顯示近 6 個月
 
 
 # ── 股票清單 ─────────────────────────────────────────────────
-def get_list(target=750):
+def get_list(target=1200):
     tw_codes  = []
     two_codes = []
 
@@ -1204,8 +1285,11 @@ def get_list(target=750):
     except Exception as e:
         print(f"[清單] 上櫃 API 失敗：{e}")
 
-    tw_codes  = tw_codes[:450]
-    two_codes = two_codes[:300]
+    # FIX-25：target 參數實際控制數量（上市60%、上櫃40%）
+    tw_n      = int(target * 0.6)
+    two_n     = target - tw_n
+    tw_codes  = tw_codes[:tw_n]
+    two_codes = two_codes[:two_n]
 
     result = [f"{c}.TW"  for c in tw_codes] + \
              [f"{c}.TWO" for c in two_codes]
@@ -1258,9 +1342,35 @@ def scan(output_dir="charts", base_url="charts"):
     print(f"[產業] 完成，涵蓋 {len(industry_data)} 個產業")
 
     industry_stage_cache = {
-        ind: get_industry_stage(dfs)
+        ind: get_industry_stage(dfs, industry_name=ind)
         for ind, dfs in industry_data.items()
     }
+
+    # FIX-20：龍頭股狀態加權 — 龍頭跌破 MA20 → 產業強制降一級
+    _stage_order = ["衰退期", "盤整過渡", "高檔成熟", "復甦初期", "成長中期", "高檔過熱"]
+    for ind, leader_code in INDUSTRY_LEADERS.items():
+        if ind not in industry_stage_cache:
+            continue
+        leader_sym = f"{leader_code}.TW"
+        try:
+            _ldf = price_cache.get(leader_sym)
+            if _ldf is None or _ldf.empty:
+                continue
+            if isinstance(_ldf.columns, pd.MultiIndex):
+                _ldf = _ldf.copy(); _ldf.columns = _ldf.columns.get_level_values(0)
+            _lc   = _ldf["Close"].squeeze().astype(float)
+            _curr = float(_lc.iloc[-1])
+            _ma20 = float(_lc.rolling(20).mean().iloc[-1])
+            if _curr < _ma20:   # 龍頭跌破月線 → 降一級
+                cur_stage = industry_stage_cache[ind]
+                if cur_stage in _stage_order:
+                    idx = _stage_order.index(cur_stage)
+                    if idx > 0:
+                        industry_stage_cache[ind] = _stage_order[idx - 1]
+                        print(f"[產業] FIX-20 {ind} 龍頭{leader_code}跌破MA20，位階降級：{cur_stage}→{industry_stage_cache[ind]}")
+        except Exception:
+            continue
+
     print("[產業] 位階快取：" + ", ".join(f"{k}={v}" for k, v in sorted(industry_stage_cache.items())))
 
     # ── 基準日：用最後一筆交易日，支援週末／假日執行 ──────────
@@ -1281,39 +1391,30 @@ def scan(output_dir="charts", base_url="charts"):
     else:
         print("[基準日] 無法確認最後交易日，以各股最後一筆為準")
 
-    # ── NEW-01：大盤濾網 ──────────────────────────────────────
-    market_status = {"twii_ok": None, "tpex_ok": None,
-                     "twii_close": None, "twii_ma20": None,
-                     "tpex_close": None, "tpex_ma20": None}
-    for idx_sym, key_prefix in [("^TWII", "twii"), ("^TPEX", "tpex")]:
-        try:
-            _mdf = yf.download(idx_sym, start=today - timedelta(days=60),
-                               end=today + timedelta(days=1), progress=False)
-            if not _mdf.empty:
-                if isinstance(_mdf.columns, pd.MultiIndex):
-                    _mdf.columns = _mdf.columns.get_level_values(0)
-                _mc   = _mdf["Close"].squeeze().astype(float)
-                _last = float(_mc.iloc[-1])
-                _ma20 = float(_mc.rolling(20).mean().iloc[-1])
-                market_status[f"{key_prefix}_close"] = round(_last, 2)
-                market_status[f"{key_prefix}_ma20"]  = round(_ma20, 2)
-                market_status[f"{key_prefix}_ok"]    = _last >= _ma20
-        except Exception:
-            pass
+    # ── NEW-01：大盤濾網（BUG-08：^TPEX yfinance抓不到，只用^TWII）──
+    market_status = {"twii_ok": None, "twii_close": None, "twii_ma20": None}
+    try:
+        _mdf = yf.download("^TWII", start=today - timedelta(days=60),
+                           end=today + timedelta(days=1), progress=False)
+        if not _mdf.empty:
+            if isinstance(_mdf.columns, pd.MultiIndex):
+                _mdf.columns = _mdf.columns.get_level_values(0)
+            _mc   = _mdf["Close"].squeeze().astype(float)
+            _last = float(_mc.iloc[-1])
+            _ma20 = float(_mc.rolling(20).mean().iloc[-1])
+            market_status["twii_close"] = round(_last, 2)
+            market_status["twii_ma20"]  = round(_ma20, 2)
+            market_status["twii_ok"]    = _last >= _ma20
+    except Exception:
+        pass
 
-    _both_ok  = market_status["twii_ok"] and market_status["tpex_ok"]
-    _one_bad  = (market_status["twii_ok"] is False) or (market_status["tpex_ok"] is False)
-    _both_bad = (market_status["twii_ok"] is False) and (market_status["tpex_ok"] is False)
-
-    if _both_ok:
+    twii_ok = market_status.get("twii_ok")
+    if twii_ok is True:
         market_warn = 0
-        print("[大盤] ✅ 加權 + 櫃買均站上MA20，正常掃描")
-    elif _both_bad:
-        market_warn = 2
-        print("[大盤] ❌❌ 加權 + 櫃買均跌破MA20，名單A全體評分 -40，高風險")
-    elif _one_bad:
+        print(f"[大盤] ✅ 加權指數 {market_status['twii_close']} 站上MA20({market_status['twii_ma20']})，正常掃描")
+    elif twii_ok is False:
         market_warn = 1
-        print("[大盤] ⚠️ 加權或櫃買其一跌破MA20，名單A全體評分 -20，需謹慎")
+        print(f"[大盤] ⚠️ 加權指數 {market_status['twii_close']} 跌破MA20({market_status['twii_ma20']})，名單A評分 -20")
     else:
         market_warn = 0
         print("[大盤] ❓ 大盤狀態無法確認，不調整評分")
@@ -1377,8 +1478,8 @@ def scan(output_dir="charts", base_url="charts"):
             if today_iloc == 0:
                 continue
 
-            today_close = float(close.iloc[today_iloc])
-            today_vol   = float(volume.iloc[today_iloc])
+            today_close = float(close.iloc[today_iloc])   # = 最後交易日收盤
+            today_vol   = float(volume.iloc[today_iloc])    # FIX-15：最後交易日量（非 calendar today）
 
             # ── 今日是否再度漲停（用於名單B判斷）────────────────────
             try:
@@ -1461,8 +1562,11 @@ def scan(output_dir="charts", base_url="charts"):
             above_ma   = today_close > ma20
             ma_bullish = today_close > ma5 > ma10 > ma20
 
-            # FIX-02：整理期每天「收盤」不能跌破首漲停最低價
-            #          盤中可以破底，但收盤必須守住（洗盤不破底原則）
+            # FIX-11：整理期破底兩層判斷
+            #   第一層：盤中最多容忍跌破 3%（超過代表籌碼鬆動）
+            if wash_lows_day and wash_period_low < limit_low * 0.97:
+                continue
+            #   第二層：整理期每天收盤不能跌破首漲停最低價
             if wash_closes and any(wc < limit_low for wc in wash_closes):
                 continue
             if today_close < limit_low:
@@ -1473,6 +1577,20 @@ def scan(output_dir="charts", base_url="charts"):
                 volatility = (wash_period_high - wash_period_low) / limit_low
                 if volatility > 0.15:
                     continue
+
+            # FIX-13：流動性濾網（冷門股跳過，隔天進出困難）
+            avg20_vol    = float(close.rolling(20).count().iloc[-1])   # placeholder先用count
+            try:
+                _vol_s  = volume.astype(float)
+                _cls_s  = close.astype(float)
+                avg20_vol    = float(_vol_s.rolling(20).mean().iloc[-1])
+                avg20_amount = float((_cls_s * _vol_s).rolling(20).mean().iloc[-1])
+                if avg20_vol < 300_000:
+                    continue   # FIX-22：日均量 < 30萬股，流動性不足
+                if avg20_amount < 20_000_000:
+                    continue   # FIX-22：日均成交額 < 2000萬，流動性不足
+            except Exception:
+                continue   # FIX-23：資料有問題直接跳過，不讓問題股通過
 
             # ── 連續縮量（評分用）────────────────────────────────────
             shrink_breaks = sum(
@@ -1511,10 +1629,9 @@ def scan(output_dir="charts", base_url="charts"):
                 if today_close < limit_low:
                     continue
 
-                # FIX-04：均線條件放寬為站上 MA20 即可進名單
-                #          MA多頭排列（MA5>MA10>MA20）影響分級，不直接淘汰
+                # FIX-10：硬條件只保留站上 MA20，MA5 改為加分項
                 if not above_ma:
-                    continue   # 跌破月線才淘汰
+                    continue   # 跌破月線才淘汰（MA5 不作硬條件）
 
                 # A6：整理期間無第二根漲停（確保尚未發動）
                 wash_second_limit = False
@@ -1775,7 +1892,7 @@ def scan(output_dir="charts", base_url="charts"):
 
             pattern['notes'] = extra_notes + pattern['notes']
 
-            stage_bonus = {"復甦初期": 20, "成長中期": 10, "高檔成熟": -10, "衰退期": -20}.get(industry_stage, 0)
+            stage_bonus = {"復甦初期": 20, "成長中期": 10, "盤整過渡": 0, "高檔過熱": -10, "高檔成熟": -10, "衰退期": -10, "樣本不足": 0, "未知": 0}.get(industry_stage, 0)
             if stage_bonus != 0:
                 pattern['score'] += stage_bonus
                 stage_emoji = "✅" if stage_bonus > 0 else "❌"
@@ -1842,7 +1959,13 @@ def scan(output_dir="charts", base_url="charts"):
 
             # ── NEW-04：隔日掛單策略 ─────────────────────────────────
             today_vs_high = today_close / wash_high_close if wash_high_close else 1
-            vol_warning   = "⚠️量偏大，注意出貨 " if today_vol > limit_vol * 0.60 else ""
+            # FIX-14：量警示區分「量大未突破（出貨疑慮）」vs「放量突破（可觀察）」
+            if today_vol_ratio > 0.9 and today_close < wash_high_close:
+                vol_warning = "⚠️ 量大未突破，注意出貨 "
+            elif today_vol_ratio > 0.9 and today_close >= wash_high_close:
+                vol_warning = "📈 放量突破，觀察是否續強 "
+            else:
+                vol_warning = ""
 
             if list_type == "B":
                 order_type    = "二波確認"
@@ -1915,7 +2038,7 @@ def scan(output_dir="charts", base_url="charts"):
                 "2R目標價":   target_price,
                 "單筆風險":    _fmt_pct(risk_pct),
                 "執行備註":    order_note,
-                "回測樣本":    bt_samples,
+                "回測樣本":    f"⚠️樣本不足({bt_samples})" if bt_samples < 10 else bt_samples,
                 "5日勝率":     _fmt_pct(bt.get("win_5")),
                 "10日勝率":    _fmt_pct(bt.get("win_10")),
                 "10日均報酬":  _fmt_pct(bt.get("avg_10")),
@@ -1928,11 +2051,14 @@ def scan(output_dir="charts", base_url="charts"):
             continue
 
     print(f"[完成] 掃描 {total} 支，符合條件共 {len(results)} 支")
-    return pd.DataFrame(results)
+    return pd.DataFrame(results), market_status  # BUG-09：帶回 market_status 供 to_html 使用
 
 
 # ── 輸出主報表 HTML ──────────────────────────────────────────
-def to_html(df, output_file="index.html"):
+def to_html(df, output_file="index.html", market_status=None):
+    # BUG-09：market_status 從 scan() 傳入，不再讀取區域變數
+    if market_status is None:
+        market_status = {}
     t = (datetime.utcnow() + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
 
     if not df.empty:
@@ -1982,13 +2108,12 @@ def to_html(df, output_file="index.html"):
     twii_badge = _mkt_badge(market_status.get("twii_ok"),
                             "加權", market_status.get("twii_close","?"),
                             market_status.get("twii_ma20","?"))
-    tpex_badge = _mkt_badge(market_status.get("tpex_ok"),
-                            "櫃買", market_status.get("tpex_close","?"),
-                            market_status.get("tpex_ma20","?"))
-    mkt_warn_color = "#26a641" if market_warn==0 else "#ffa500" if market_warn==1 else "#f85149"
-    mkt_warn_text  = ["✅ 大盤多頭，正常操作",
-                      "⚠️ 大盤偏弱，降低部位",
-                      "❌ 大盤空頭，謹慎勿追"][market_warn]
+    # BUG-08：移除 tpex_badge（^TPEX 抓不到）
+    # BUG-09：market_warn 從傳入的 market_status 推導
+    _twii_ok = market_status.get("twii_ok")
+    market_warn = 1 if _twii_ok is False else 0
+    mkt_warn_color = "#26a641" if market_warn == 0 else "#ffa500"
+    mkt_warn_text  = "✅ 大盤多頭，正常操作" if market_warn == 0 else "⚠️ 加權指數跌破MA20，降低部位"
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-TW">
@@ -2026,7 +2151,7 @@ def to_html(df, output_file="index.html"):
   <p class="meta">台北時間：{t}　｜　選股區間：1~10 個交易日整理</p>
   <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:10px 18px;margin-bottom:14px;font-size:.82rem;display:flex;gap:24px;flex-wrap:wrap;align-items:center;">
     <span style="color:{mkt_warn_color};font-weight:700">{mkt_warn_text}</span>
-    {twii_badge}&nbsp;&nbsp;{tpex_badge}
+    {twii_badge}
   </div>
   {count_info}
   <div class="hint">
@@ -2049,5 +2174,5 @@ def to_html(df, output_file="index.html"):
 
 # ── 入口 ─────────────────────────────────────────────────────
 if __name__ == "__main__":
-    df = scan(output_dir="charts", base_url="./charts")
-    to_html(df, output_file="index.html")
+    df, market_status = scan(output_dir="charts", base_url="./charts")
+    to_html(df, output_file="index.html", market_status=market_status)
