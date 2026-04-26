@@ -1263,7 +1263,7 @@ def scan(output_dir="charts", base_url="charts"):
     }
     print("[產業] 位階快取：" + ", ".join(f"{k}={v}" for k, v in sorted(industry_stage_cache.items())))
 
-    print(f"[掃描] 共 {total} 支，條件：前 3~10 交易日首次漲停 + 縮量洗盤 + 型態分析")
+    print(f"[掃描] 共 {total} 支，條件：首漲停→高檔整理2~6天（收盤維持漲停日實體區間）→今日再度漲停（二波攻擊）")
 
     for i, s in enumerate(stocks):
         try:
@@ -1285,43 +1285,25 @@ def scan(output_dir="charts", base_url="charts"):
             close  = df['Close'].squeeze()
             volume = df['Volume'].squeeze()
             open_  = df['Open'].squeeze()
+            high_  = df['High'].squeeze()
 
             if not isinstance(close, pd.Series):
                 continue
 
-            pct          = close.pct_change()
             trading_days = close.index
             n_td         = len(trading_days)
 
-            lo = max(0, n_td - 10)
-            hi = max(0, n_td - 3)
-            if lo >= hi:
+            if n_td < 20:
                 continue
 
-            limit_close_days = []
-            for idx in trading_days[lo:hi]:
-                try:
-                    iloc_pos = list(close.index).index(idx)
-                    if iloc_pos == 0:
-                        continue
-                    prev_c = float(close.iloc[iloc_pos - 1])
-                    limit_price = calc_limit_price(prev_c)
-                    day_close   = float(close.loc[idx])
-                    if day_close >= limit_price * 0.999:
-                        limit_close_days.append(idx)
-                except Exception:
-                    continue
-
-            if not limit_close_days:
-                continue
-
+            # ── 先建立全資料漲停日清單 ─────────────────────────────
             all_limit_close = []
             for idx in trading_days:
                 try:
                     iloc_pos = list(close.index).index(idx)
                     if iloc_pos == 0:
                         continue
-                    prev_c = float(close.iloc[iloc_pos - 1])
+                    prev_c      = float(close.iloc[iloc_pos - 1])
                     limit_price = calc_limit_price(prev_c)
                     day_close   = float(close.loc[idx])
                     if day_close >= limit_price * 0.999:
@@ -1329,100 +1311,200 @@ def scan(output_dir="charts", base_url="charts"):
                 except Exception:
                     continue
 
-            limit_days = pd.DatetimeIndex(limit_close_days)
+            # ── 掃描邏輯：二波攻擊型（N字型態）────────────────────────
+            # 條件1：首漲停後整理 2~6 天，每天收盤在漲停價 ±5% 以內
+            # 條件2：今日收盤創整理期新高（突破高點）
+            today_idx  = trading_days[-1]
+            today_iloc = n_td - 1
+            if today_iloc == 0:
+                continue
 
-            last_limit_date  = limit_days[-1]
-            three_months_ago = last_limit_date - pd.DateOffset(months=3)
+            today_close = float(close.iloc[today_iloc])
+
+            # ── 往前找首次漲停（整理天數 2~6 → 首漲停在第 3~8 根前）────
+            first_limit_date = None
+            first_limit_iloc = None
+            first_limit_price_val = None   # 漲停價（用來定義整理區間 ±5%）
+
+            for offset in range(3, 9):
+                candidate_iloc = today_iloc - offset
+                if candidate_iloc <= 0:
+                    break
+                try:
+                    prev_c_cand      = float(close.iloc[candidate_iloc - 1])
+                    limit_price_cand = calc_limit_price(prev_c_cand)
+                    cand_close       = float(close.iloc[candidate_iloc])
+                    if cand_close >= limit_price_cand * 0.999:
+                        first_limit_date      = trading_days[candidate_iloc]
+                        first_limit_iloc      = candidate_iloc
+                        first_limit_price_val = limit_price_cand   # 漲停價
+                        break
+                except Exception:
+                    continue
+
+            if first_limit_date is None:
+                continue
+
+            # ── 首次漲停：近三個月內不能有更早的漲停 ───────────────
+            three_months_ago = first_limit_date - pd.DateOffset(months=3)
             prior_limits = [d for d in all_limit_close
-                           if d < last_limit_date and d >= three_months_ago]
+                            if d < first_limit_date and d >= three_months_ago]
             if prior_limits:
                 continue
 
-            limit_vol  = float(volume.loc[last_limit_date])
-            limit_low  = float(open_.loc[last_limit_date])
+            # ── 整理天數 ──────────────────────────────────────────────
+            wash_idxs       = range(first_limit_iloc + 1, today_iloc)   # 不含今日
+            wash_days_count = len(list(wash_idxs))
 
-            curr_price = float(close.iloc[-1])
-            curr_vol   = float(volume.iloc[-1])
-            ma20       = float(close.rolling(20).mean().iloc[-1])
-
-            shrink     = curr_vol < limit_vol * 0.5
-            hold_low   = curr_price >= limit_low
-            above_ma   = curr_price > ma20
-
-            is_washing_type = None
-            if shrink and hold_low and above_ma:
-                is_washing      = True
-                is_washing_type = "洗盤型"
-            elif above_ma and curr_vol > limit_vol * 0.8 and curr_price > float(close.iloc[-2]):
-                is_washing      = True
-                is_washing_type = "強勢續攻型"
-            else:
-                is_washing = False
-
-            if not is_washing:
+            if wash_days_count < 2 or wash_days_count > 6:
                 continue
 
-            vol_ratio_pct = f"{round((curr_vol / limit_vol) * 100)}%"
-            days_since    = len([d for d in trading_days if d > last_limit_date])
+            # ── 整理期驗證：每天收盤在漲停價 ±5% 以內 ──────────────
+            band_lo = first_limit_price_val * 0.95
+            band_hi = first_limit_price_val * 1.05
+
+            all_in_range = True
+            for wi in wash_idxs:
+                try:
+                    wc = float(close.iloc[wi])
+                    if wc < band_lo or wc > band_hi:
+                        all_in_range = False
+                        break
+                except Exception:
+                    all_in_range = False
+                    break
+
+            if not all_in_range:
+                continue
+
+            # ── 觸發驗證：今日收盤必須創整理期新高 ──────────────────
+            wash_close_highs = [float(close.iloc[wi]) for wi in wash_idxs]
+            wash_period_high  = max(wash_close_highs) if wash_close_highs else 0
+
+            if today_close <= wash_period_high:
+                continue   # 未突破整理期收盤高點，跳過
+
+            # ── 通過！────────────────────────────────────────────────
+            limit_vol   = float(volume.iloc[first_limit_iloc])
+            second_vol  = float(volume.iloc[today_iloc])
+            curr_price  = today_close
+            curr_vol    = second_vol
+            ma20        = float(close.rolling(20).mean().iloc[-1])
+            above_ma    = curr_price > ma20
+
+            vol_ratio_pct   = f"{round((second_vol / limit_vol) * 100)}%" if limit_vol > 0 else "-"
+            days_since      = wash_days_count
 
             code   = s.split('.')[0]
             market = "上市" if s.endswith(".TW") else "上櫃"
             name   = name_map.get(code, "")
 
+            # limit_days：首漲停日 + 今日（K線圖標示用）
+            limit_days = pd.DatetimeIndex([first_limit_date, today_idx])
+
             industry, industry_stage = resolve_industry_stage(code, df, industry_lookup, industry_stage_cache)
+
+            vol_expand      = second_vol >= limit_vol * 0.8
+            is_washing      = True
+            is_washing_type = "二波攻擊型（N字）"
 
             wash_info = {
                 "vol_ratio":    vol_ratio_pct,
                 "above_ma20":   above_ma,
-                "hold_low":     hold_low,
+                "hold_low":     True,
                 "washing_type": is_washing_type,
             }
 
             pattern = analyze_pattern(df, list(limit_days))
 
+            # ── 二波型態加分邏輯（取代原洗盤加分）───────────────────
             wash_score_notes = []
-            if shrink:
+
+            # 整理天數加分（越短越強）
+            if 2 <= wash_days_count <= 3:
+                pattern['score'] += 25
+                wash_score_notes.append(f"✅ 整理僅 {wash_days_count} 天即發動二波，主力控盤力強")
+            elif wash_days_count <= 5:
+                pattern['score'] += 15
+                wash_score_notes.append(f"✅ 整理 {wash_days_count} 天後二波突破，節奏標準")
+            else:
+                pattern['score'] += 8
+                wash_score_notes.append(f"⚠️ 整理 {wash_days_count} 天，稍長但仍在範圍")
+
+            # 整理期均價與漲停價的偏離度（越靠近漲停價越強）
+            avg_wash_close = float(
+                sum(float(close.iloc[wi]) for wi in wash_idxs) / wash_days_count
+            )
+            deviation_pct = abs(avg_wash_close - first_limit_price_val) / first_limit_price_val * 100
+            if deviation_pct <= 1.5:
                 pattern['score'] += 20
-                wash_score_notes.append("✅ 縮量洗盤（今日量 < 漲停量 50%），主力鎖碼")
+                wash_score_notes.append(f"✅ 整理均價緊貼漲停價（偏離 {deviation_pct:.1f}%），主力高度鎖碼")
+            elif deviation_pct <= 3.0:
+                pattern['score'] += 12
+                wash_score_notes.append(f"✅ 整理均價靠近漲停價（偏離 {deviation_pct:.1f}%），鎖碼尚佳")
             else:
-                wash_score_notes.append(f"⚠️ 量能未縮（今日量 {vol_ratio_pct}），主力態度未明")
-            if hold_low:
-                pattern['score'] += 10
-                wash_score_notes.append("✅ 守住漲停日起漲點，籌碼穩定")
+                pattern['score'] += 5
+                wash_score_notes.append(f"⚠️ 整理均價偏離漲停價 {deviation_pct:.1f}%，整理位置偏低")
+
+            # 今日突破幅度（收盤 vs 整理期最高收盤）
+            breakout_pct = (today_close - wash_period_high) / wash_period_high * 100
+            if breakout_pct >= 3.0:
+                pattern['score'] += 15
+                wash_score_notes.append(f"✅ 今日強力突破整理高點（+{breakout_pct:.1f}%），動能充沛")
+            elif breakout_pct >= 1.0:
+                pattern['score'] += 8
+                wash_score_notes.append(f"⚠️ 今日小幅突破整理高點（+{breakout_pct:.1f}%），需確認持續")
             else:
-                wash_score_notes.append("❌ 跌破起漲點，籌碼鬆動")
+                wash_score_notes.append(f"⚠️ 今日勉強突破整理高點（+{breakout_pct:.1f}%），突破力道弱")
+
+            # 二波量能 vs 首波
+            if vol_expand:
+                pattern['score'] += 20
+                wash_score_notes.append(f"✅ 二波量能充沛（首波 {round(second_vol/limit_vol*100)}%），突破有效")
+            else:
+                wash_score_notes.append(f"⚠️ 二波量能未達首波 80%（僅 {round(second_vol/limit_vol*100) if limit_vol>0 else '-'}%），留意假突破")
+
+            # 站上月線
             if above_ma:
                 pattern['score'] += 5
                 wash_score_notes.append("✅ 站上月線，趨勢向上")
             else:
                 wash_score_notes.append("❌ 跌破月線，趨勢偏弱")
+
             pattern['notes'] = wash_score_notes + pattern['notes']
 
             extra_notes = []
 
+            # A. 首漲停當天量能是否放大（vs 前5日均量）
             try:
-                limit_idx = list(close.index).index(last_limit_date)
-                if limit_idx >= 5:
-                    avg_vol_5 = float(volume.iloc[limit_idx-5:limit_idx].mean())
-                    limit_day_vol = float(volume.loc[last_limit_date])
-                    if avg_vol_5 > 0 and limit_day_vol >= avg_vol_5 * 1.5:
+                if first_limit_iloc >= 5:
+                    avg_vol_5     = float(volume.iloc[first_limit_iloc-5:first_limit_iloc].mean())
+                    first_day_vol = float(volume.iloc[first_limit_iloc])
+                    if avg_vol_5 > 0 and first_day_vol >= avg_vol_5 * 1.5:
                         pattern['score'] += 15
-                        extra_notes.append(f"✅ 漲停當天量能放大（是前5日均量 {round(limit_day_vol/avg_vol_5, 1)} 倍），主力積極介入")
+                        extra_notes.append(f"✅ 首漲停量能放大（是前5日均量 {round(first_day_vol/avg_vol_5, 1)} 倍），主力強力介入")
                     else:
-                        extra_notes.append(f"⚠️ 漲停當天量能未明顯放大（{round(limit_day_vol/avg_vol_5, 1) if avg_vol_5 > 0 else '-'} 倍），主力積極度不足")
+                        extra_notes.append(f"⚠️ 首漲停量能未明顯放大（{round(first_day_vol/avg_vol_5, 1) if avg_vol_5>0 else '-'} 倍）")
             except Exception:
                 pass
 
+            # B. 整理期量能是否逐日萎縮（縮量整理最佳）
             try:
-                limit_idx = list(close.index).index(last_limit_date)
-                wash_vols = volume.iloc[limit_idx+1:]
-                if len(wash_vols) >= 2:
-                    all_shrink = all(float(v) < limit_vol * 0.5 for v in wash_vols)
-                    if all_shrink:
+                wash_vol_list = [float(volume.iloc[wi]) for wi in wash_idxs]
+                if len(wash_vol_list) >= 2:
+                    all_shrink_wash = all(
+                        wash_vol_list[k] >= wash_vol_list[k+1]
+                        for k in range(len(wash_vol_list)-1)
+                    )
+                    avg_wash_vol = sum(wash_vol_list) / len(wash_vol_list)
+                    if all_shrink_wash:
                         pattern['score'] += 15
-                        extra_notes.append(f"✅ 洗盤期間每天量能都 < 漲停量 50%，連續縮量鎖碼")
+                        extra_notes.append("✅ 整理期量能逐日遞減，縮量蓄勢明顯")
+                    elif avg_wash_vol < limit_vol * 0.6:
+                        pattern['score'] += 8
+                        extra_notes.append("⚠️ 整理期量能偏小但不規則，籌碼尚穩")
                     else:
-                        extra_notes.append("⚠️ 洗盤期間量能不穩定，非每天縮量")
+                        extra_notes.append("⚠️ 整理期量能偏大，主力控盤力度有限")
             except Exception:
                 pass
 
@@ -1473,20 +1555,19 @@ def scan(output_dir="charts", base_url="charts"):
 
             try:
                 ma60 = close.rolling(60).mean()
-                limit_idx   = list(close.index).index(last_limit_date)
-                ma60_before = float(ma60.iloc[limit_idx - 1]) if limit_idx >= 1 else None
-                ma60_at     = float(ma60.iloc[limit_idx])
-                close_before = float(close.iloc[limit_idx - 1]) if limit_idx >= 1 else None
-                close_at     = float(close.loc[last_limit_date])
+                ma60_before  = float(ma60.iloc[first_limit_iloc - 1]) if first_limit_iloc >= 1 else None
+                ma60_at      = float(ma60.iloc[first_limit_iloc])
+                close_before = float(close.iloc[first_limit_iloc - 1]) if first_limit_iloc >= 1 else None
+                close_at     = float(close.iloc[first_limit_iloc])
                 if ma60_before and close_before:
                     if close_before < ma60_before and close_at >= ma60_at:
                         pattern['score'] += 20
-                        extra_notes.append(f"✅ 漲停日突破季線（MA60={ma60_at:.1f}），強力突破壓力")
+                        extra_notes.append(f"✅ 首漲停日突破季線（MA60={ma60_at:.1f}），強力突破壓力")
                     elif close_before >= ma60_before:
                         pattern['score'] += 8
-                        extra_notes.append(f"⚠️ 漲停前已在季線之上（MA60={ma60_at:.1f}），非突破型態")
+                        extra_notes.append(f"⚠️ 首漲停前已在季線之上（MA60={ma60_at:.1f}），非突破型態")
                     else:
-                        extra_notes.append(f"❌ 漲停日未能突破季線（MA60={ma60_at:.1f}），壓力未解除")
+                        extra_notes.append(f"❌ 首漲停日未能突破季線（MA60={ma60_at:.1f}），壓力未解除")
             except Exception:
                 pass
 
@@ -1501,45 +1582,27 @@ def scan(output_dir="charts", base_url="charts"):
             ps = pattern['score']
             pattern['grade'] = "🔥🔥 極強" if ps >= 140 else "🔥 強" if ps >= 100 else "⚠️ 普通" if ps >= 60 else "❌ 弱"
 
-            wash_high = 0
-            wash_low = 0
-            is_breakout = False
-            breakout_strength = 0
+            # ── 二波型態：今日本身就是突破日，breakout 恆 True ─────────
+            wash_high          = 0
+            wash_low           = 0
+            is_breakout        = True    # 今日再度漲停即為突破
+            breakout_strength  = 0
             breakout_vol_ratio = 0
-            breakout_str = "-"
+            breakout_str       = "-"
             try:
-                limit_idx  = list(close.index).index(last_limit_date)
-                wash_highs = df['High'].iloc[limit_idx+1:-1]
-                wash_lows  = df['Low'].iloc[limit_idx+1:-1]
-
-                if len(wash_highs) >= 2:
-                    wash_high   = float(wash_highs.max())
-                    wash_low    = float(wash_lows.min())
-                    today_close = float(close.iloc[-1])
-                    is_breakout = today_close > wash_high
-                    if is_breakout:
-                        breakout_strength  = round(today_close / wash_high, 3)
-                        breakout_vol_ratio = round(curr_vol / limit_vol, 2)
-                        if breakout_vol_ratio >= 0.5:
-                            breakout_str = f"🔥 突破 {breakout_strength:.2f}x（有量）"
-                        else:
-                            breakout_str = f"⚠️ 突破 {breakout_strength:.2f}x（量縮試盤）"
-                    else:
-                        breakout_strength  = 0
-                        breakout_vol_ratio = 0
-                        breakout_str       = "-"
+                wash_highs_s = df['High'].iloc[list(wash_idxs)]
+                wash_lows_s  = df['Low'].iloc[list(wash_idxs)]
+                wash_high    = float(wash_highs_s.max())
+                wash_low     = float(wash_lows_s.min())
+                breakout_strength  = round(today_close / wash_high, 3)
+                breakout_vol_ratio = round(second_vol / limit_vol, 2)
+                bp = (today_close - wash_period_high) / wash_period_high * 100 if wash_period_high > 0 else 0
+                if breakout_vol_ratio >= 0.8:
+                    breakout_str = f"🔥 突破 +{bp:.1f}% 有量（首波 {round(breakout_vol_ratio*100)}%）"
                 else:
-                    is_breakout        = False
-                    breakout_strength  = 0
-                    breakout_vol_ratio = 0
-                    breakout_str       = "-"
-                    wash_low           = float(close.loc[last_limit_date])
+                    breakout_str = f"⚠️ 突破 +{bp:.1f}% 量弱（首波 {round(breakout_vol_ratio*100)}%）"
             except Exception:
-                is_breakout        = False
-                breakout_strength  = 0
-                breakout_vol_ratio = 0
-                breakout_str       = "-"
-                wash_low           = 0
+                wash_low = float(close.iloc[first_limit_iloc])
 
             try:
                 kd_series = []
@@ -1566,36 +1629,25 @@ def scan(output_dir="charts", base_url="charts"):
             except Exception:
                 kd_golden = False
 
-            next_order_price = round(wash_high * 1.01, 2) if wash_high else "-"
-            pullback_ref = round(wash_high, 2) if (is_breakout and wash_high) else "-"
+            # ── 隔日策略：二波漲停後建議等回測，勿追漲停 ────────────
             stop_loss_ref = round(wash_low, 2) if wash_low else "-"
+            entry_ref     = round(wash_high, 2) if wash_high else "-"
 
-            if isinstance(next_order_price, (int, float)) and isinstance(stop_loss_ref, (int, float)):
-                risk = next_order_price - stop_loss_ref
-                risk_pct = risk / next_order_price if next_order_price > 0 else None
-                target_price = round(next_order_price + risk * 2, 2) if risk > 0 else "-"
+            if isinstance(entry_ref, (int, float)) and isinstance(stop_loss_ref, (int, float)):
+                risk         = entry_ref - stop_loss_ref
+                risk_pct     = risk / entry_ref if entry_ref > 0 else None
+                target_price = round(entry_ref + risk * 2, 2) if risk > 0 else "-"
             else:
-                risk = None
-                risk_pct = None
+                risk         = None
+                risk_pct     = None
                 target_price = "-"
 
-            is_entry = (
-                is_breakout and breakout_vol_ratio >= 0.5 and
-                pattern['score'] >= 100 and curr_price > wash_high * 1.01
-            ) if is_breakout and wash_high else False
-            kd_resonance = is_entry and kd_golden
+            order_type    = "回測觀察"
+            order_display = entry_ref
+            order_note    = "二波漲停發動；隔日勿追漲停，等回測整理高點不破再進場"
 
-            if is_breakout:
-                order_type = "回測觀察"
-                order_note = "已突破，隔日勿追高；等回測突破價不破"
-                order_display = pullback_ref
-            else:
-                order_type = "突破掛單"
-                order_note = "隔日突破掛單；未觸價不進場"
-                order_display = next_order_price
-
-            if kd_resonance:
-                order_note = "KD共振；仍以隔日掛單/回測條件執行"
+            if kd_golden:
+                order_note = "KD 黃金交叉共振；仍以回測條件執行，勿衝漲停追價"
 
             dates = [d.strftime('%m/%d') for d in limit_days]
             stage_color = '#26a641' if industry_stage in ['復甦初期', '成長中期'] else '#f85149' if industry_stage == '衰退期' else '#ffa500'
@@ -1618,27 +1670,27 @@ def scan(output_dir="charts", base_url="charts"):
 
             results.append({
                 "_score":    pattern['score'],
-                "_vol_num":  float(vol_ratio_pct.rstrip('%')),
+                "_vol_num":  float(vol_ratio_pct.rstrip('%')) if vol_ratio_pct != '-' else 0,
                 "代碼": (
                     f"<a href='{chart_link}' target='_blank' "
                     f"style='color:#58a6ff;font-weight:700;text-decoration:none'>"
                     f"{code} 📊</a>"
                 ),
-                "名稱":      name,
-                "市場":      market,
-                "產業":      industry,
-                "產業位階":   f"<span style='color:{stage_color}'>{industry_stage}</span>",
-                "型態評分":   f"<span style='color:{'#26a641' if pattern['score']>=70 else '#ffa500' if pattern['score']>=50 else '#f85149'};font-weight:700'>{pattern['score']} 分 {pattern['grade']}</span>",
-                "洗盤量比":   vol_ratio_pct,
-                "距漲停天數": days_since,
-                "漲停板":     pattern['limit_quality'],
-                "收盤價":    round(curr_price, 2),
-                "漲停軌跡":   " / ".join(dates),
-                "突破洗盤":    breakout_str,
+                "名稱":       name,
+                "市場":       market,
+                "產業":       industry,
+                "產業位階":    f"<span style='color:{stage_color}'>{industry_stage}</span>",
+                "型態評分":    f"<span style='color:{'#26a641' if pattern['score']>=70 else '#ffa500' if pattern['score']>=50 else '#f85149'};font-weight:700'>{pattern['score']} 分 {pattern['grade']}</span>",
+                "二波量/首波":  vol_ratio_pct,
+                "整理天數":    days_since,
+                "首漲停板":    pattern['limit_quality'],
+                "收盤價":     round(curr_price, 2),
+                "漲停軌跡":    " / ".join(dates),
+                "二波狀態":    breakout_str,
                 "隔日策略":    order_type,
-                "隔日掛單/觀察價": order_display,
+                "回測觀察價":  order_display,
                 "停損參考":    stop_loss_ref,
-                "2R目標價":    target_price,
+                "2R目標價":   target_price,
                 "單筆風險":    _fmt_pct(risk_pct),
                 "執行備註":    order_note,
                 "回測樣本":    bt_samples,
@@ -1653,7 +1705,7 @@ def scan(output_dir="charts", base_url="charts"):
             print(f"[{s}] 錯誤：{e}")
             continue
 
-    print(f"[完成] 掃描 {total} 支，準備起飛共 {len(results)} 支")
+    print(f"[完成] 掃描 {total} 支，二波攻擊型態共 {len(results)} 支")
     return pd.DataFrame(results)
 
 
@@ -1662,25 +1714,25 @@ def to_html(df, output_file="index.html"):
     t = (datetime.utcnow() + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
 
     if not df.empty:
-        df_break = df[df['突破洗盤'] != '-'].sort_values(['_score', '_vol_num'], ascending=[False, True]).drop(columns=['_score', '_vol_num'])
-        df_watch = df[df['突破洗盤'] == '-'].sort_values(['_score', '_vol_num'], ascending=[False, True]).drop(columns=['_score', '_vol_num'])
+        df_break = df[df['二波狀態'] != '-'].sort_values(['_score', '_vol_num'], ascending=[False, True]).drop(columns=['_score', '_vol_num'])
+        df_watch = df[df['二波狀態'] == '-'].sort_values(['_score', '_vol_num'], ascending=[False, True]).drop(columns=['_score', '_vol_num'])
 
         break_html = df_break.to_html(index=False, escape=False) if not df_break.empty else "<p style='color:var(--muted);padding:12px'>目前無突破標的</p>"
         watch_html = df_watch.to_html(index=False, escape=False) if not df_watch.empty else "<p style='color:var(--muted);padding:12px'>目前無洗盤中標的</p>"
 
         table_html = (
             "<h2 style='color:#ffa500;font-size:1.1rem;margin:20px 0 10px'>"
-            "🔥 已突破洗盤區間（可考慮進場）</h2>" +
+            "🔥 今日二波漲停發動（隔日回測進場）</h2>" +
             break_html +
             "<h2 style='color:#58a6ff;font-size:1.1rem;margin:28px 0 10px'>"
-            "📊 洗盤中（持續觀察）</h2>" +
+            "📊 整理觀察中（尚未二波發動）</h2>" +
             watch_html
         )
         count_info = (
             f"<p class='count'>"
             f"本次掃描共 <strong style='color:#d93025'>{len(df)}</strong> 支符合條件，"
-            f"其中 <strong style='color:#ffa500'>{len(df_break)} 支</strong> 已突破，"
-            f"<strong style='color:#58a6ff'>{len(df_watch)} 支</strong> 洗盤中"
+            f"其中 <strong style='color:#ffa500'>{len(df_break)} 支</strong> 二波發動，"
+            f"<strong style='color:#58a6ff'>{len(df_watch)} 支</strong> 整理中"
             f"&nbsp;｜&nbsp; 點擊代碼查看 K 線圖</p>"
         )
     else:
@@ -1723,13 +1775,14 @@ def to_html(df, output_file="index.html"):
   <p class="meta">台北時間：{t}　｜　選股區間：前 3~10 個交易日</p>
   {count_info}
   <div class="hint">
-    <b>💡 選股邏輯</b><br>
-    第一關：前 3~10 個交易日內出現漲停（≥9.8%）<br>
-    第二關（洗盤三條件同時成立）：縮量 &lt; 50% ＋ 守起漲點 ＋ 站上月線<br>
-    第三關（型態評分）：一字板、量能遞減、均線排列、K 棒型態綜合評分<br>
-    第四關（產業位階）：依同產業均線結構加減分，區分復甦、成長、高檔與衰退<br>
-    第五關（歷史回測）：統計同檔股票過去類似訊號後 5/10/20 日勝率與報酬<br>
-    📊 最終輸出：分為已突破與洗盤中，並列出隔日掛單/觀察價、停損參考、2R目標價與回測表現
+    <b>💡 選股邏輯（二波攻擊型）</b><br>
+    第一關：首次漲停（近三個月內無前例），整理 2~6 天（距今 3~8 根）<br>
+    第二關：整理期每天收盤在漲停價 ±5% 以內（高檔盤整，不跑遠）<br>
+    第三關：<b>今日收盤創整理期新高</b>（二波突破確認，不要求再度漲停）<br>
+    第四關（型態評分）：整理緊縮度、二波量能、均線排列、K 棒型態、季線突破等綜合評分<br>
+    第五關（產業位階）：依同產業均線結構加減分，區分復甦、成長、高檔與衰退<br>
+    📊 最終輸出：整理天數、二波量/首波比、停損參考（整理低點）、2R目標價與回測表現<br>
+    ⚡ 操作提示：二波漲停當日勿追，等隔日回測整理期高點不破再進場
   </div>
   {table_html}
 </body>
