@@ -6,11 +6,6 @@ import time
 import os
 import json
 
-# ── Gemini API Key（從環境變數讀取，不要寫在程式碼裡）─────────
-# 設定方式：在命令提示字元執行 setx GEMINI_API_KEY "你的key"
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-
-
 # ── 抓取中文名稱對照表 ────────────────────────────────────────
 def fetch_name_map() -> dict:
     name_map = {}
@@ -30,74 +25,6 @@ def fetch_name_map() -> dict:
     except Exception as e:
         print(f"[名稱] 上櫃 API 失敗：{e}")
     return name_map
-
-
-# ── 爬三大法人資料 ───────────────────────────────────────────
-def fetch_institutional(code: str, is_tw: bool, days: int = 10) -> list:
-    """
-    使用證交所/櫃買 OpenAPI 抓三大法人資料（公開無需登入）
-    上市：openapi.twse.com.tw
-    上櫃：openapi.tpex.org.tw
-    """
-    def safe_int(s):
-        try:
-            return int(str(s).replace(",", "").replace("+", "").strip())
-        except Exception:
-            return 0
-
-    results = []
-    today   = datetime.now()
-
-    # 收集近 days 個工作日
-    trading_dates = []
-    for delta in range(1, days * 3):
-        d = today - timedelta(days=delta)
-        if d.weekday() < 5:
-            trading_dates.append(d)
-        if len(trading_dates) >= days:
-            break
-
-    for d in reversed(trading_dates):
-        date_str = d.strftime("%Y%m%d")
-        try:
-            if is_tw:
-                # 上市：證交所 OpenAPI 三大法人
-                url = f"https://openapi.twse.com.tw/v1/fund/TWT38U?date={date_str}"
-                r   = requests.get(url, timeout=10)
-                if r.status_code != 200:
-                    continue
-                data = r.json()
-                for row in data:
-                    if str(row.get("股票代號", "")).strip() == code:
-                        results.append({
-                            "date":    d.strftime("%m/%d"),
-                            "foreign": safe_int(row.get("外陸資買賣超股數(不含外資自營商)", 0)),
-                            "trust":   safe_int(row.get("投信買賣超股數", 0)),
-                            "dealer":  safe_int(row.get("自營商買賣超股數", 0)),
-                        })
-                        break
-            else:
-                # 上櫃：櫃買 OpenAPI 三大法人
-                url = f"https://www.tpex.org.tw/openapi/v1/tpex_3insti_diff_vol_ratio?date={date_str}"
-                r   = requests.get(url, timeout=10)
-                if r.status_code != 200:
-                    continue
-                data = r.json()
-                for row in data:
-                    if str(row.get("SecuritiesCompanyCode", "")).strip() == code:
-                        results.append({
-                            "date":    d.strftime("%m/%d"),
-                            "foreign": safe_int(row.get("ForeignInvestmentNetBuy", 0)),
-                            "trust":   safe_int(row.get("InvestmentTrustNetBuy", 0)),
-                            "dealer":  safe_int(row.get("DealerNetBuy", 0)),
-                        })
-                        break
-        except Exception as e:
-            print(f"  [法人] {d.strftime('%m/%d')} 錯誤：{e}")
-            continue
-        time.sleep(0.3)
-
-    return results
 
 
 
@@ -245,7 +172,7 @@ def analyze_pattern(df: pd.DataFrame, limit_days: list) -> dict:
 
 
 # ── K 線圖 HTML ──────────────────────────────────────────────
-def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, inst_data, pattern, ai_analysis=''):
+def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, pattern):
     code   = symbol.split('.')[0]
     market = "上市" if symbol.endswith(".TW") else "上櫃"
 
@@ -262,8 +189,31 @@ def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, ins
             "limit":  idx.strftime('%Y-%m-%d') in limit_set,
         })
 
-    data_json  = json.dumps(records,   ensure_ascii=False)
-    inst_json  = json.dumps(inst_data, ensure_ascii=False)
+    # 計算均線
+    closes = [r['close'] for r in records]
+    def ma(n):
+        result = []
+        for i in range(len(closes)):
+            if i < n - 1:
+                result.append(None)
+            else:
+                result.append(round(sum(closes[i-n+1:i+1]) / n, 2))
+        return result
+
+    ma5_vals  = ma(5)
+    ma10_vals = ma(10)
+    ma20_vals = ma(20)
+    ma60_vals  = ma(60)
+    ma240_vals = ma(240)
+
+    for j, r in enumerate(records):
+        r['ma5']  = ma5_vals[j]
+        r['ma10'] = ma10_vals[j]
+        r['ma20'] = ma20_vals[j]
+        r['ma60']  = ma60_vals[j]
+        r['ma240'] = ma240_vals[j]
+
+    data_json  = json.dumps(records, ensure_ascii=False)
     last_close = records[-1]['close'] if records else 0
     limit_count = len(limit_days)
 
@@ -373,7 +323,7 @@ def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, ins
 
 <!-- K 線圖 -->
 <div class="wrap">
-  <div class="wrap-title">K 線圖（近 60 天）</div>
+  <div class="wrap-title">K 線圖（近兩年）</div>
   <canvas id="kc"></canvas>
   <div id="tip"></div>
 </div>
@@ -381,6 +331,11 @@ def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, ins
   <span><span class="dot" style="background:var(--up)"></span>上漲</span>
   <span><span class="dot" style="background:var(--down)"></span>下跌</span>
   <span><span class="dot" style="background:var(--limit)"></span>漲停</span>
+  <span><span class="dot" style="background:#f0c040"></span>MA5</span>
+  <span><span class="dot" style="background:#e06080"></span>MA10</span>
+  <span><span class="dot" style="background:#58a6ff"></span>MA20</span>
+  <span><span class="dot" style="background:#bc8cff"></span>MA60</span>
+  <span><span class="dot" style="background:#ff8c42"></span>MA240</span>
 </div>
 
 <!-- 成交量 -->
@@ -389,22 +344,6 @@ def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, ins
   <canvas id="vc"></canvas>
 </div>
 
-<!-- 三大法人 -->
-<div class="wrap" style="padding:12px 14px; margin-top:12px;">
-  <div class="wrap-title">三大法人買賣超（張）</div>
-  <canvas id="ic"></canvas>
-  <div style="display:flex;gap:18px;font-size:.72rem;color:var(--muted);margin-top:8px;">
-    <span><span class="dot" style="background:#58a6ff"></span>外資</span>
-    <span><span class="dot" style="background:#ffa500"></span>投信</span>
-    <span><span class="dot" style="background:#bc8cff"></span>自營商</span>
-  </div>
-</div>
-
-<!-- AI 分析說明 -->
-<div class="card" style="margin-top:12px;margin-bottom:12px;">
-  <div class="s-label" style="margin-bottom:10px">🤖 Gemini AI 操盤分析</div>
-  <div style="font-size:.88rem;line-height:1.9;color:var(--text);white-space:pre-wrap">{ai_analysis}</div>
-</div>
 
 <!-- 型態分析評分卡 -->
 <div class="grid2" style="margin-top:12px;">
@@ -422,7 +361,6 @@ def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, ins
 
 <script>
 const DATA = {data_json};
-const INST = {inst_json};
 const DPR  = window.devicePixelRatio || 1;
 
 function setup(canvas, h) {{
@@ -439,11 +377,9 @@ function setup(canvas, h) {{
 function draw() {{
   const kcan = document.getElementById('kc');
   const vcan = document.getElementById('vc');
-  const ican = document.getElementById('ic');
   const tip  = document.getElementById('tip');
   const {{ ctx:kc, w, h:kh }} = setup(kcan, 300);
   const {{ ctx:vc, h:vh }}    = setup(vcan, 70);
-  const {{ ctx:ic, h:ih }}    = setup(ican, 100);
 
   const n=DATA.length, PL=10, PR=52, PT=16, PB=26;
   const cw=w-PL-PR, ch=kh-PT-PB;
@@ -487,6 +423,27 @@ function draw() {{
     }}
   }});
 
+  // 均線
+  function drawMA(key, color) {{
+    kc.strokeStyle = color;
+    kc.lineWidth   = 1.2;
+    kc.beginPath();
+    let started = false;
+    DATA.forEach((d, i) => {{
+      if (d[key] === null || d[key] === undefined) {{ started = false; return; }}
+      const x = PL + i * gap + gap / 2;
+      const y = py(d[key]);
+      if (!started) {{ kc.moveTo(x, y); started = true; }}
+      else kc.lineTo(x, y);
+    }});
+    kc.stroke();
+  }}
+  drawMA('ma5',  '#f0c040');
+  drawMA('ma10', '#e06080');
+  drawMA('ma20', '#58a6ff');
+  drawMA('ma60',  '#bc8cff');
+  drawMA('ma240', '#ff8c42');
+
   // volume
   const volMax=Math.max(...DATA.map(d=>d.volume));
   DATA.forEach((d,i)=>{{
@@ -496,42 +453,6 @@ function draw() {{
     vc.fillRect(x-bw/2,vh-(d.volume/volMax)*(vh-8),bw,(d.volume/volMax)*(vh-8));
   }});
 
-  // 三大法人圖
-  if(INST.length>0){{
-    const ig=cw/INST.length, ibw=Math.max(3,ig/4);
-    const allVals=INST.flatMap(d=>[d.foreign,d.trust,d.dealer]);
-    const iMax=Math.max(...allVals.map(Math.abs),1);
-    const mid=ih/2;
-    const iscale=v=>(Math.abs(v)/iMax)*(ih/2-8);
-
-    // zero line
-    ic.strokeStyle=GR; ic.lineWidth=1;
-    ic.beginPath(); ic.moveTo(PL,mid); ic.lineTo(w-PR,mid); ic.stroke();
-
-    INST.forEach((d,i)=>{{
-      const x=PL+i*ig+ig/2;
-      // 外資
-      const fh=iscale(d.foreign);
-      ic.fillStyle='#58a6ff88';
-      ic.fillRect(x-ibw*1.5,d.foreign>=0?mid-fh:mid,ibw,fh);
-      // 投信
-      const th=iscale(d.trust);
-      ic.fillStyle='#ffa50088';
-      ic.fillRect(x-ibw*0.3,d.trust>=0?mid-th:mid,ibw,th);
-      // 自營
-      const dh=iscale(d.dealer);
-      ic.fillStyle='#bc8cff88';
-      ic.fillRect(x+ibw*0.9,d.dealer>=0?mid-dh:mid,ibw,dh);
-
-      if(i%Math.max(1,Math.floor(INST.length/5))===0){{
-        ic.fillStyle=MU; ic.font='9px SF Mono,monospace'; ic.textAlign='center';
-        ic.fillText(d.date,x,ih-4);
-      }}
-    }});
-  }} else {{
-    ic.fillStyle=MU; ic.font='12px SF Mono,monospace'; ic.textAlign='center';
-    ic.fillText('三大法人資料載入中或暫無資料',w/2,ih/2+4);
-  }}
 
   // tooltip
   kcan.onmousemove=e=>{{
@@ -546,6 +467,11 @@ function draw() {{
       <div>低 <b>${{d.low}}</b></div>
       <div>收 <b style="color:${{col}}">${{d.close}}</b> (${{chg>0?'+':''}}${{chg}}%)</div>
       <div>量 <b>${{(d.volume/1000).toFixed(0)}}K</b></div>
+      ${{d.ma5  ? `<div style="color:#f0c040">MA5 <b>${{d.ma5}}</b></div>` : ''}}
+      ${{d.ma10 ? `<div style="color:#e06080">MA10 <b>${{d.ma10}}</b></div>` : ''}}
+      ${{d.ma20 ? `<div style="color:#58a6ff">MA20 <b>${{d.ma20}}</b></div>` : ''}}
+      ${{d.ma60  ? `<div style="color:#bc8cff">MA60 <b>${{d.ma60}}</b></div>` : ''}}
+      ${{d.ma240 ? `<div style="color:#ff8c42">MA240 <b>${{d.ma240}}</b></div>` : ''}}
       ${{d.limit?'<div style="color:#ffa500;font-weight:700;margin-top:4px">🔥 漲停</div>':''}}`;
     tip.style.display='block';
     const tx=e.clientX-r.left+14;
@@ -563,70 +489,6 @@ window.addEventListener('resize',draw);
 
 
 
-# ── Gemini AI 分析說明 ────────────────────────────────────────
-def gemini_analysis(code: str, name: str, pattern: dict, wash_info: dict,
-                    inst_data: list, days_since: int) -> str:
-    """打包資料送給 Gemini Flash，取得操盤手角度的中文分析說明"""
-    if not GEMINI_API_KEY or GEMINI_API_KEY == "貼在這裡":
-        return "（尚未設定 Gemini API Key，請填入 GEMINI_API_KEY）"
-
-    # 整理三大法人近期方向
-    inst_summary = "無資料"
-    if inst_data:
-        foreign_total = sum(d.get("foreign", 0) for d in inst_data)
-        trust_total   = sum(d.get("trust",   0) for d in inst_data)
-        dealer_total  = sum(d.get("dealer",  0) for d in inst_data)
-        inst_summary  = (
-            f"外資近{len(inst_data)}天合計：{'買超' if foreign_total > 0 else '賣超'} {abs(foreign_total)} 張，"
-            f"投信：{'買超' if trust_total > 0 else '賣超'} {abs(trust_total)} 張，"
-            f"自營商：{'買超' if dealer_total > 0 else '賣超'} {abs(dealer_total)} 張"
-        )
-
-    notes_text = "\n".join(pattern.get("notes", []))
-
-    prompt = f"""你是一位經驗豐富的台股操盤手，請根據以下量化資料，用繁體中文寫一段約150~200字的分析說明。
-語氣要像在跟投資人簡報，直接、有重點，指出這支股票的優勢與潛在風險。
-
-【股票】{code} {name}
-【漲停板品質】{pattern.get("limit_quality", "未知")}
-【距漲停天數】{days_since} 天
-【洗盤量比】{wash_info.get("vol_ratio", "-")}（低於50%代表主力縮手鎖碼）
-【均線狀態】MA5={pattern.get("ma5")} / MA10={pattern.get("ma10")} / MA20={pattern.get("ma20")}
-【月線】{"站上" if wash_info.get("above_ma20") else "跌破"}月線
-【起漲點】{"守住" if wash_info.get("hold_low") else "跌破"}漲停日起漲點
-【型態評分】{pattern.get("score")} 分（{pattern.get("grade")}）
-【型態分析細節】
-{notes_text}
-【三大法人】{inst_summary}
-
-請直接輸出分析內容，不要加標題或編號。"""
-
-
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
-    )
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 400}
-    }
-    for attempt in range(3):  # 最多重試 3 次
-        try:
-            r = requests.post(url, json=payload, timeout=20)
-            if r.status_code == 429:
-                wait = 30 * (attempt + 1)
-                print(f"  [Gemini] 限流，等待 {wait} 秒後重試...")
-                time.sleep(wait)
-                continue
-            r.raise_for_status()
-            result = r.json()
-            text = result["candidates"][0]["content"]["parts"][0]["text"]
-            return text.strip()
-        except Exception as e:
-            print(f"  [Gemini] 第 {attempt+1} 次失敗：{e}")
-            if attempt < 2:
-                time.sleep(10)
-    return "（AI 分析暫時無法使用）"
 
 # ── 股票清單 ─────────────────────────────────────────────────
 def get_list():
@@ -673,7 +535,7 @@ def scan(output_dir="charts", base_url="charts"):
 
     stocks      = get_list()
     today       = datetime.now()
-    fetch_start = today - timedelta(days=130)  # 多抓 ~3 個月，供「首次漲停」回溯用
+    fetch_start = today - timedelta(days=730)  # 抓兩年資料，K 線圖顯示兩年 + 首次漲停回溯
     fetch_end   = today
     results     = []
     total       = len(stocks)
@@ -704,28 +566,54 @@ def scan(output_dir="charts", base_url="charts"):
             trading_days = close.index
             n_td         = len(trading_days)
 
-            # ── 第一關：前 3~10 個交易日內有漲停 ──────────────
+            # ── 第一關：前 3~10 個交易日內有「收盤鎖板」漲停 ──
             lo = max(0, n_td - 10)
             hi = max(0, n_td - 3)
             if lo >= hi:
                 continue
 
-            window_dates = set(trading_days[lo:hi].strftime('%Y-%m-%d'))
-            all_limit    = pct[pct >= 0.098].index
-            limit_days   = all_limit[all_limit.strftime('%Y-%m-%d').isin(window_dates)]
+            # 計算每天的漲停價（前一天收盤 × 1.1，無條件捨去至小數點後2位）
+            # 收盤價 >= 漲停價 × 0.999 才算收盤鎖板（容許些微誤差）
+            limit_close_days = []
+            for idx in trading_days[lo:hi]:
+                try:
+                    iloc_pos = list(close.index).index(idx)
+                    if iloc_pos == 0:
+                        continue
+                    prev_c = float(close.iloc[iloc_pos - 1])
+                    limit_price = round(prev_c * 1.1, 2)
+                    day_close   = float(close.loc[idx])
+                    if day_close >= limit_price * 0.999:
+                        limit_close_days.append(idx)
+                except Exception:
+                    continue
 
-            if limit_days.empty:
+            if not limit_close_days:
                 continue
 
-            # ── 第一關補充：近三個月首次漲停（該漲停前 3 個月內不能有其他漲停）──
-            last_limit_date = limit_days[-1]
+            # 同時也計算近三個月所有收盤鎖板日（供首次漲停判斷用）
+            all_limit_close = []
+            for idx in trading_days:
+                try:
+                    iloc_pos = list(close.index).index(idx)
+                    if iloc_pos == 0:
+                        continue
+                    prev_c = float(close.iloc[iloc_pos - 1])
+                    limit_price = round(prev_c * 1.1, 2)
+                    day_close   = float(close.loc[idx])
+                    if day_close >= limit_price * 0.999:
+                        all_limit_close.append(idx)
+                except Exception:
+                    continue
+
+            limit_days = pd.DatetimeIndex(limit_close_days)
+
+            # ── 第一關補充：近三個月首次漲停 ──────────────────
+            last_limit_date  = limit_days[-1]
             three_months_ago = last_limit_date - pd.DateOffset(months=3)
-            # 找出「漲停日之前」的所有漲停
-            prior_limits = all_limit[
-                (all_limit < last_limit_date) &
-                (all_limit >= three_months_ago)
-            ]
-            if not prior_limits.empty:
+            prior_limits = [d for d in all_limit_close
+                           if d < last_limit_date and d >= three_months_ago]
+            if prior_limits:
                 continue  # 前 3 個月內已有漲停，不是首次啟動，跳過
 
             limit_vol  = float(volume.loc[last_limit_date])
@@ -747,7 +635,6 @@ def scan(output_dir="charts", base_url="charts"):
             code   = s.split('.')[0]
             market = "上市" if s.endswith(".TW") else "上櫃"
             name   = name_map.get(code, "")
-            is_tw  = s.endswith(".TW")
 
             wash_info = {
                 "vol_ratio":  vol_ratio_pct,
@@ -777,20 +664,94 @@ def scan(output_dir="charts", base_url="charts"):
                 wash_score_notes.append("❌ 跌破月線，趨勢偏弱")
             pattern['notes'] = wash_score_notes + pattern['notes']
 
-            # 重新計算評分等級
+            # ── 新增條件加分 ────────────────────────────────
+            extra_notes = []
+
+            # A. 漲停當天量是否放大（>= 前5日均量 1.5 倍）
+            try:
+                limit_idx = list(close.index).index(last_limit_date)
+                if limit_idx >= 5:
+                    avg_vol_5 = float(volume.iloc[limit_idx-5:limit_idx].mean())
+                    limit_day_vol = float(volume.loc[last_limit_date])
+                    if avg_vol_5 > 0 and limit_day_vol >= avg_vol_5 * 1.5:
+                        pattern['score'] += 15
+                        extra_notes.append(f"✅ 漲停當天量能放大（是前5日均量 {round(limit_day_vol/avg_vol_5, 1)} 倍），主力積極介入")
+                    else:
+                        extra_notes.append(f"⚠️ 漲停當天量能未明顯放大（{round(limit_day_vol/avg_vol_5, 1) if avg_vol_5 > 0 else '-'} 倍），主力積極度不足")
+            except Exception:
+                pass
+
+            # B. 洗盤期間是否連續縮量（漲停後每天都 < 漲停量 50%）
+            try:
+                limit_idx = list(close.index).index(last_limit_date)
+                wash_vols = volume.iloc[limit_idx+1:]
+                if len(wash_vols) >= 2:
+                    all_shrink = all(float(v) < limit_vol * 0.5 for v in wash_vols)
+                    if all_shrink:
+                        pattern['score'] += 15
+                        extra_notes.append(f"✅ 洗盤期間每天量能都 < 漲停量 50%，連續縮量鎖碼")
+                    else:
+                        extra_notes.append("⚠️ 洗盤期間量能不穩定，非每天縮量")
+            except Exception:
+                pass
+
+            # C. 股價位置（近一年低檔區啟動 vs 高檔區啟動）
+            try:
+                year_high = float(close.rolling(min(252, len(close))).max().iloc[-1])
+                year_low  = float(close.rolling(min(252, len(close))).min().iloc[-1])
+                price_range = year_high - year_low
+                if price_range > 0:
+                    position = (curr_price - year_low) / price_range
+                    if position <= 0.4:
+                        pattern['score'] += 15
+                        extra_notes.append(f"✅ 股價位於近一年低檔區（位置 {round(position*100)}%），低風險啟動")
+                    elif position <= 0.7:
+                        pattern['score'] += 5
+                        extra_notes.append(f"⚠️ 股價位於近一年中段區（位置 {round(position*100)}%）")
+                    else:
+                        extra_notes.append(f"❌ 股價位於近一年高檔區（位置 {round(position*100)}%），追高風險高")
+            except Exception:
+                pass
+
+            # D. 站上年線（MA240）
+            try:
+                ma240 = close.rolling(240).mean()
+                ma240_today = float(ma240.iloc[-1])
+                if not pd.isna(ma240_today):
+                    if curr_price > ma240_today:
+                        pattern['score'] += 20
+                        extra_notes.append(f"✅ 股價站上年線（MA240={ma240_today:.1f}），長線趨勢向上")
+                    else:
+                        pattern['score'] -= 15
+                        extra_notes.append(f"❌ 股價跌破年線（MA240={ma240_today:.1f}），長線趨勢偏弱，風險高")
+            except Exception:
+                pass
+
+            # E. 漲停日是否突破季線（MA60）
+            try:
+                ma60 = close.rolling(60).mean()
+                limit_idx   = list(close.index).index(last_limit_date)
+                ma60_before = float(ma60.iloc[limit_idx - 1]) if limit_idx >= 1 else None
+                ma60_at     = float(ma60.iloc[limit_idx])
+                close_before = float(close.iloc[limit_idx - 1]) if limit_idx >= 1 else None
+                close_at     = float(close.loc[last_limit_date])
+                if ma60_before and close_before:
+                    if close_before < ma60_before and close_at >= ma60_at:
+                        pattern['score'] += 20
+                        extra_notes.append(f"✅ 漲停日突破季線（MA60={ma60_at:.1f}），強力突破壓力")
+                    elif close_before >= ma60_before:
+                        pattern['score'] += 8
+                        extra_notes.append(f"⚠️ 漲停前已在季線之上（MA60={ma60_at:.1f}），非突破型態")
+                    else:
+                        extra_notes.append(f"❌ 漲停日未能突破季線（MA60={ma60_at:.1f}），壓力未解除")
+            except Exception:
+                pass
+
+            pattern['notes'] = extra_notes + pattern['notes']
+
+            # 重新計算評分等級（滿分約 197 分）
             ps = pattern['score']
-            pattern['grade'] = "🔥🔥 極強" if ps >= 85 else "🔥 強" if ps >= 60 else "⚠️ 普通" if ps >= 35 else "❌ 弱" 
-
-            # ── 爬三大法人 ─────────────────────────────────────
-            print(f"  [{code}] 抓三大法人資料...")
-            inst_data = fetch_institutional(code, is_tw, days=10)
-
-            # ── Gemini AI 分析 ─────────────────────────────────
-            print(f"  [{code}] 呼叫 Gemini 分析...")
-            time.sleep(60)  # 避免 429 限流（每分鐘限制）
-            ai_analysis = gemini_analysis(
-                code, name, pattern, wash_info, inst_data, days_since
-            )
+            pattern['grade'] = "🔥🔥 極強" if ps >= 140 else "🔥 強" if ps >= 100 else "⚠️ 普通" if ps >= 60 else "❌ 弱"
 
             # ── 產生 K 線圖 ────────────────────────────────────
             chart_file      = os.path.join(output_dir, f"{code}.html")
@@ -798,7 +759,7 @@ def scan(output_dir="charts", base_url="charts"):
             with open(chart_file, "w", encoding="utf-8") as f:
                 f.write(generate_chart_html(
                     s, name, df, list(limit_days),
-                    is_washing, wash_info, inst_data, pattern, ai_analysis
+                    is_washing, wash_info, pattern
                 ))
 
             dates = [d.strftime('%m/%d') for d in limit_days]
