@@ -83,12 +83,6 @@ industry_map = {
 
 # ── 產業位階判斷 ─────────────────────────────────────────────
 def get_industry_stage(industry_dfs: list) -> str:
-    """
-    用同產業股票的均線結構判斷產業位階。
-    修正重點：
-    1. MA240 只用有 240 日以上資料的股票當分母，避免 r240 被低估。
-    2. 不符合明確多空條件時回傳「盤整過渡」，不要一律判為「衰退期」。
-    """
     if not industry_dfs:
         return "未知"
 
@@ -127,19 +121,12 @@ def get_industry_stage(industry_dfs: list) -> str:
     r60 = above_ma60 / valid60
     r240 = above_ma240 / valid240 if valid240 > 0 else None
 
-    # 多數股票站上月線與季線，但年線尚未全面轉強：復甦初期
     if r20 >= 0.65 and r60 >= 0.55 and (r240 is None or r240 < 0.55):
         return "復甦初期"
-
-    # 多數股票同時站上月線、季線、年線：成長中期
     if r20 >= 0.65 and r60 >= 0.65 and (r240 is None or r240 >= 0.55):
         return "成長中期"
-
-    # 短線轉弱但中長線仍撐住：高檔成熟
     if r20 < 0.50 and r60 >= 0.55:
         return "高檔成熟"
-
-    # 月線、季線多數跌破：衰退期
     if r20 < 0.45 and r60 < 0.45:
         return "衰退期"
 
@@ -148,14 +135,12 @@ def get_industry_stage(industry_dfs: list) -> str:
 
 # ── 官方產業分類抓取 ─────────────────────────────────────────
 def normalize_industry_name(raw: str) -> str:
-    """將交易所產業別名稱簡化，避免顯示過長。"""
     if not raw:
         return ""
 
     name = str(raw).strip()
     name = name.replace("業", "").replace("類", "").replace("股票", "")
 
-    # 常見分類簡化
     mapping_keywords = [
         ("半導體", "半導體"),
         ("電子零組件", "電子零組件"),
@@ -189,10 +174,6 @@ def normalize_industry_name(raw: str) -> str:
 
 
 def fetch_official_industry_map() -> dict:
-    """
-    從 TWSE/TPEX 公司基本資料 OpenAPI 抓官方產業別。
-    若 API 欄位名稱異動，使用模糊欄位比對，避免整批失效。
-    """
     result = {}
 
     sources = [
@@ -227,7 +208,6 @@ def fetch_official_industry_map() -> dict:
                     or ""
                 )
 
-                # 欄位名稱若不同，模糊找「產業」欄位
                 if not industry:
                     for k, v in item.items():
                         if "產業" in str(k) or "Industry" in str(k):
@@ -247,13 +227,6 @@ def fetch_official_industry_map() -> dict:
 
 # ── 產業位階 fallback ────────────────────────────────────────
 def resolve_industry_stage(code: str, df: pd.DataFrame, industry_lookup: dict, industry_stage_cache: dict) -> tuple:
-    """
-    回傳產業與位階。
-    修正重點：
-    1. 不再把未分類股票全部塞成「其他」並套用同一個市場位階。
-    2. 有官方/手動產業分類就用產業位階。
-    3. 若真的找不到產業，顯示「未分類」，位階以該股自身均線結構估計。
-    """
     industry = industry_lookup.get(code, "未分類")
     stage = industry_stage_cache.get(industry)
 
@@ -265,10 +238,8 @@ def resolve_industry_stage(code: str, df: pd.DataFrame, industry_lookup: dict, i
 
 # ── 台股漲停價計算（含跳動價位）────────────────────────────────
 def calc_limit_price(prev_close: float) -> float:
-    """依台股跳動價位規則計算漲停價"""
     raw = prev_close * 1.1
 
-    # 依跳動單位無條件捨去
     if raw < 10:
         tick = 0.01
     elif raw < 50:
@@ -288,17 +259,14 @@ def calc_limit_price(prev_close: float) -> float:
     return math.floor(raw / tick) * tick
 
 
-
 # ── 簡易回測模組 ─────────────────────────────────────────────
 def _fmt_pct(value):
-    """將小數格式化成百分比字串。"""
     if value is None or pd.isna(value):
         return "-"
     return f"{value * 100:.1f}%"
 
 
 def _forward_return_and_drawdown(close: pd.Series, signal_pos: int, horizon: int) -> tuple:
-    """計算訊號後 horizon 個交易日的收盤報酬與期間最大回撤。"""
     if signal_pos + horizon >= len(close):
         return None, None
 
@@ -316,11 +284,6 @@ def _forward_return_and_drawdown(close: pd.Series, signal_pos: int, horizon: int
 
 
 def backtest_strategy(df: pd.DataFrame, horizons=(5, 10, 20)) -> dict:
-    """
-    以目前選股核心邏輯做簡易歷史回測。
-    注意：這是單檔股票的歷史訊號統計，不等於未來保證勝率。
-    訊號邏輯：前 3~10 交易日首次漲停，之後出現洗盤型或強勢續攻型。
-    """
     empty = {
         "samples": 0,
         "win_5": None, "avg_5": None,
@@ -363,7 +326,6 @@ def backtest_strategy(df: pd.DataFrame, horizons=(5, 10, 20)) -> dict:
 
             last_limit_i = limit_candidates[-1]
 
-            # 近三個月內首次漲停：往前約 63 個交易日檢查
             start_check = max(1, last_limit_i - 63)
             prior_limit = False
             for j in range(start_check, last_limit_i):
@@ -452,10 +414,8 @@ def fetch_name_map() -> dict:
     return name_map
 
 
-
 # ── K 線型態分析 ─────────────────────────────────────────────
 def analyze_pattern(df: pd.DataFrame, limit_days: list) -> dict:
-    """分析 K 線型態，回傳評分與說明"""
     score  = 0
     notes  = []
 
@@ -468,7 +428,6 @@ def analyze_pattern(df: pd.DataFrame, limit_days: list) -> dict:
     low    = df['Low'].squeeze()
     volume = df['Volume'].squeeze()
 
-    # ── 漲停板品質 ────────────────────────────────────────────
     limit_quality = "未知"
     if limit_days:
         last_ld = limit_days[-1]
@@ -494,12 +453,11 @@ def analyze_pattern(df: pd.DataFrame, limit_days: list) -> dict:
         except Exception:
             limit_quality = "無法判斷"
 
-    # ── 洗盤天數與量能趨勢 ────────────────────────────────────
     if limit_days:
         last_ld  = limit_days[-1]
         try:
             li       = list(close.index).index(last_ld)
-            wash_vol = volume.iloc[li+1:]  # 漲停後的量
+            wash_vol = volume.iloc[li+1:]
             wash_days = len(wash_vol)
 
             if 2 <= wash_days <= 6:
@@ -512,7 +470,6 @@ def analyze_pattern(df: pd.DataFrame, limit_days: list) -> dict:
                 score += 5
                 notes.append(f"⚠️ 洗盤 {wash_days} 天，時間偏長熱度可能已散")
 
-            # 量能是否逐步萎縮
             if len(wash_vol) >= 2:
                 is_shrinking = all(
                     wash_vol.iloc[i] >= wash_vol.iloc[i+1]
@@ -526,7 +483,6 @@ def analyze_pattern(df: pd.DataFrame, limit_days: list) -> dict:
         except Exception:
             pass
 
-    # ── 近期 K 棒型態（最後 3 根）────────────────────────────
     recent = df.iloc[-3:]
     for idx, row in recent.iterrows():
         o = float(row['Open'])
@@ -538,12 +494,10 @@ def analyze_pattern(df: pd.DataFrame, limit_days: list) -> dict:
         upper   = h - max(o, c)
         lower   = min(o, c) - l
 
-        # 錘子線（下影線長，實體小，出現在低位）
         if lower > body * 2 and upper < body * 0.5 and rng > 0:
             score += 10
             notes.append(f"✅ {idx.strftime('%m/%d')} 出現錘子線，止跌訊號")
 
-        # 吞噬（今日陽線實體吞掉昨日陰線）
         if len(recent) >= 2:
             prev_idx = recent.index[list(recent.index).index(idx) - 1] if idx != recent.index[0] else None
             if prev_idx is not None:
@@ -553,11 +507,9 @@ def analyze_pattern(df: pd.DataFrame, limit_days: list) -> dict:
                     score += 12
                     notes.append(f"✅ {idx.strftime('%m/%d')} 多頭吞噬，強力止跌")
 
-        # 十字星（實體極小，觀望訊號）
         if body / rng < 0.1:
             notes.append(f"⚠️ {idx.strftime('%m/%d')} 十字星，多空拉鋸中")
 
-    # ── 均線多頭排列 ─────────────────────────────────────────
     ma5  = float(close.rolling(5).mean().iloc[-1])
     ma10 = float(close.rolling(10).mean().iloc[-1])
     ma20 = float(close.rolling(20).mean().iloc[-1])
@@ -572,10 +524,6 @@ def analyze_pattern(df: pd.DataFrame, limit_days: list) -> dict:
     else:
         notes.append("❌ 均線排列不佳，趨勢偏弱")
 
-    # ── 洗盤加分（由外部傳入）─────────────────────────────
-    # 由 scan() 呼叫後再加分，這裡先佔位
-
-    # ── 評分等級 ────────────────────────────────────────────
     if score >= 70:
         grade = "🔥🔥 極強"
     elif score >= 50:
@@ -596,7 +544,7 @@ def analyze_pattern(df: pd.DataFrame, limit_days: list) -> dict:
     }
 
 
-# ── K 線圖 HTML ──────────────────────────────────────────────
+# ── K 線圖 HTML（含縮放區間功能）───────────────────────────────
 def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, pattern, wash_low_val=0, target_val=0, entry_val=0, industry='', industry_stage=''):
     code   = symbol.split('.')[0]
     market = "上市" if symbol.endswith(".TW") else "上櫃"
@@ -614,7 +562,6 @@ def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, pat
             "limit":  idx.strftime('%Y-%m-%d') in limit_set,
         })
 
-    # 計算均線
     closes = [r['close'] for r in records]
     def ma(n):
         result = []
@@ -625,52 +572,26 @@ def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, pat
                 result.append(round(sum(closes[i-n+1:i+1]) / n, 2))
         return result
 
-    ma5_vals  = ma(5)
-    ma10_vals = ma(10)
-    ma20_vals = ma(20)
+    ma5_vals   = ma(5)
+    ma10_vals  = ma(10)
+    ma20_vals  = ma(20)
     ma60_vals  = ma(60)
     ma240_vals = ma(240)
 
-    # 計算 KD（9日隨機指標）
-    highs  = [r['high']  for r in records]
-    lows   = [r['low']   for r in records]
-    closes = [r['close'] for r in records]
-    n_kd   = 9
-    k_vals = []
-    d_vals = []
-    prev_k = 50.0
-    prev_d = 50.0
-    for j in range(len(records)):
-        if j < n_kd - 1:
-            k_vals.append(None)
-            d_vals.append(None)
-        else:
-            hh = max(highs[j-n_kd+1:j+1])
-            ll = min(lows[j-n_kd+1:j+1])
-            rsv = ((closes[j] - ll) / (hh - ll) * 100) if hh != ll else 50.0
-            k   = prev_k * 2/3 + rsv * 1/3
-            d   = prev_d * 2/3 + k   * 1/3
-            k_vals.append(round(k, 1))
-            d_vals.append(round(d, 1))
-            prev_k = k
-            prev_d = d
-
     for j, r in enumerate(records):
-        r['ma5']  = ma5_vals[j]
-        r['ma10'] = ma10_vals[j]
-        r['ma20'] = ma20_vals[j]
+        r['ma5']   = ma5_vals[j]
+        r['ma10']  = ma10_vals[j]
+        r['ma20']  = ma20_vals[j]
         r['ma60']  = ma60_vals[j]
         r['ma240'] = ma240_vals[j]
-        r['k']    = k_vals[j]
-        r['d']    = d_vals[j]
 
-    data_json   = json.dumps(records, ensure_ascii=False)
-    ref_lines   = json.dumps({
+    data_json = json.dumps(records, ensure_ascii=False)
+    ref_lines = json.dumps({
         "entry":     round(entry_val,    2) if entry_val    else 0,
         "stop_loss": round(wash_low_val, 2) if wash_low_val else 0,
         "target":    round(target_val,   2) if target_val   else 0,
     })
-    last_close = records[-1]['close'] if records else 0
+    last_close  = records[-1]['close'] if records else 0
     limit_count = len(limit_days)
 
     status_html = (
@@ -685,7 +606,6 @@ def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, pat
     ma20_ok   = "✅ 站上月線" if wash_info.get('above_ma20') else "❌ 跌破月線"
     hold_low  = "✅ 守住起漲點" if wash_info.get('hold_low') else "❌ 跌破起漲點"
 
-    # 型態評分卡
     score      = pattern.get('score', 0)
     grade      = pattern.get('grade', '-')
     p_notes    = pattern.get('notes', [])
@@ -694,7 +614,7 @@ def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, pat
     ma10       = pattern.get('ma10', '-')
     ma20_val   = pattern.get('ma20', '-')
 
-    notes_html = "".join(f"<li>{n}</li>" for n in p_notes)
+    notes_html  = "".join(f"<li>{n}</li>" for n in p_notes)
     score_color = "#26a641" if score >= 70 else "#ffa500" if score >= 50 else "#f85149"
 
     return f"""<!DOCTYPE html>
@@ -731,7 +651,7 @@ def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, pat
   #tip{{ background:var(--panel); border:1px solid var(--border);
          border-radius:6px; padding:10px 16px; font-size:.82rem;
          line-height:1.8; flex-wrap:wrap; display:flex; gap:12px; align-items:center; }}
-  .legend{{ display:flex; gap:18px; font-size:.72rem; color:var(--muted); margin-top:8px; margin-bottom:12px; }}
+  .legend{{ display:flex; gap:18px; font-size:.72rem; color:var(--muted); margin-top:8px; margin-bottom:12px; flex-wrap:wrap; }}
   .dot{{ display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; }}
   .score-ring{{ font-size:2.5rem; font-weight:700; color:{score_color}; }}
   ul.notes{{ list-style:none; padding:0; font-size:.82rem; line-height:2; }}
@@ -739,6 +659,18 @@ def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, pat
   ul.notes li:last-child{{ border-bottom:none; }}
   .ma-row{{ display:flex; gap:16px; font-size:.82rem; margin-top:8px; flex-wrap:wrap; }}
   .ma-item{{ background:#1c2128; border-radius:4px; padding:4px 10px; }}
+  /* 區間按鈕 */
+  .range-bar{{ display:flex; gap:6px; margin-bottom:10px; align-items:center; flex-wrap:wrap; }}
+  .rbtn{{
+    background:transparent; color:var(--muted);
+    border:1px solid var(--border); border-radius:4px;
+    padding:3px 12px; font-size:.75rem; font-family:inherit;
+    cursor:pointer; transition:border-color .15s, color .15s;
+  }}
+  .rbtn:hover{{ border-color:var(--accent); color:var(--accent); }}
+  .rbtn.active{{ border-color:var(--accent); color:var(--accent); font-weight:700; }}
+  /* 縮略導航 */
+  #nc{{ cursor:col-resize; }}
 </style>
 </head>
 <body>
@@ -779,13 +711,25 @@ def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, pat
   </div>
 </div>
 
-<!-- K 線圖 -->
-<!-- 資訊列（K 線圖上方） -->
+<!-- 快速區間切換列 -->
+<div class="range-bar">
+  <span style="font-size:.72rem;color:var(--muted);margin-right:4px;">區間：</span>
+  <button class="rbtn" id="rb-20"  onclick="setRange(20)">1M</button>
+  <button class="rbtn" id="rb-60"  onclick="setRange(60)">3M</button>
+  <button class="rbtn" id="rb-120" onclick="setRange(120)">6M</button>
+  <button class="rbtn" id="rb-250" onclick="setRange(250)">1Y</button>
+  <button class="rbtn" id="rb-all" onclick="setRange(-1)">All</button>
+  <span style="font-size:.72rem;color:var(--muted);margin-left:8px;">｜ 滾輪縮放 ｜ 底部拖拉</span>
+</div>
+
+<!-- 游標資訊列 -->
 <div id="tip" style="margin-bottom:8px;font-size:.82rem;">
   <span style="color:var(--muted)">← 滑鼠移到 K 線圖查看詳細資訊</span>
 </div>
+
+<!-- K 線圖 -->
 <div class="wrap">
-  <div class="wrap-title">K 線圖（近兩年）</div>
+  <div class="wrap-title">K 線圖</div>
   <canvas id="kc"></canvas>
 </div>
 <div class="legend">
@@ -816,11 +760,14 @@ def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, pat
   </div>
 </div>
 
-
-
+<!-- 縮略圖導航（拖拉選區間）-->
+<div class="wrap" style="padding:10px 14px;margin-bottom:16px;">
+  <div class="wrap-title">區間選取（拖拉邊界縮放 ／ 拖拉中間平移）</div>
+  <canvas id="nc"></canvas>
+</div>
 
 <!-- 型態分析評分卡 -->
-<div class="grid2" style="margin-top:12px;">
+<div class="grid2" style="margin-top:4px;">
   <div class="card">
     <div class="s-label">型態評分</div>
     <div class="score-ring">{score} 分</div>
@@ -834,84 +781,125 @@ def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, pat
 </div>
 
 <script>
-const DATA     = {data_json};
+const DATA      = {data_json};
 const REF_LINES = {ref_lines};
-const DPR  = window.devicePixelRatio || 1;
+const DPR       = window.devicePixelRatio || 1;
+const N         = DATA.length;
 
+// ── 縮放狀態 ──────────────────────────────────────────────────
+let viewStart = Math.max(0, N - 120);
+let viewEnd   = N;
+
+// ── 拖拉狀態（縮略圖）────────────────────────────────────────
+let _isDragging   = false;
+let _navMode      = null;   // 'left' | 'right' | 'move'
+let _navDragX     = 0;
+let _navViewStart = 0;
+let _navViewEnd   = 0;
+
+// ── canvas 初始化 ─────────────────────────────────────────────
 function setup(canvas, h) {{
   const w = canvas.parentElement.clientWidth - 28;
   canvas.style.width  = w + 'px';
   canvas.style.height = h + 'px';
-  canvas.width  = w * DPR;
-  canvas.height = h * DPR;
+  canvas.width  = Math.floor(w * DPR);
+  canvas.height = Math.floor(h * DPR);
   const ctx = canvas.getContext('2d');
   ctx.scale(DPR, DPR);
   return {{ ctx, w, h }};
 }}
 
+// ── KD 計算（對任意資料切片）─────────────────────────────────
+function calcKD(slice) {{
+  const ks = [], ds = [];
+  let pk = 50, pd = 50;
+  for (let j = 0; j < slice.length; j++) {{
+    if (j < 8) {{ ks.push(null); ds.push(null); continue; }}
+    const win  = slice.slice(j - 8, j + 1);
+    const hh   = Math.max(...win.map(d => d.high));
+    const ll   = Math.min(...win.map(d => d.low));
+    const rsv  = hh !== ll ? (slice[j].close - ll) / (hh - ll) * 100 : 50;
+    const k    = pk * 2/3 + rsv * 1/3;
+    const d    = pd * 2/3 + k   * 1/3;
+    ks.push(parseFloat(k.toFixed(1)));
+    ds.push(parseFloat(d.toFixed(1)));
+    pk = k; pd = d;
+  }}
+  return {{ ks, ds }};
+}}
+
+// ── 主繪圖函式 ────────────────────────────────────────────────
 function draw() {{
-  const kcan = document.getElementById('kc');
-  const vcan = document.getElementById('vc');
-  const kdcan= document.getElementById('kdc');
-  const tip  = document.getElementById('tip');
-  const {{ ctx:kc, w, h:kh }} = setup(kcan, 300);
-  const {{ ctx:vc, h:vh }}    = setup(vcan, 70);
-  const {{ ctx:kdc,h:kdh }}   = setup(kdcan, 80);
+  const kcan  = document.getElementById('kc');
+  const vcan  = document.getElementById('vc');
+  const kdcan = document.getElementById('kdc');
+  const ncan  = document.getElementById('nc');
 
-  const n=DATA.length, PL=10, PR=52, PT=16, PB=26;
-  const cw=w-PL-PR, ch=kh-PT-PB;
-  const gap=cw/n, bw=Math.max(2,gap-3);
-  const UP='#26a641',DN='#f85149',LM='#ffa500',MU='#8b949e',GR='#21262d';
+  const {{ ctx:kc,  w, h:kh  }} = setup(kcan,  300);
+  const {{ ctx:vc,     h:vh  }} = setup(vcan,   70);
+  const {{ ctx:kdc,    h:kdh }} = setup(kdcan,  80);
+  const {{ ctx:nc,     h:nh  }} = setup(ncan,   44);
 
-  const pMin=Math.min(...DATA.map(d=>d.low))*0.995;
-  const pMax=Math.max(...DATA.map(d=>d.high))*1.005;
-  const pr=pMax-pMin;
-  const py=v=>PT+ch-((v-pMin)/pr)*ch;
+  const slice = DATA.slice(viewStart, viewEnd);
+  const sn    = slice.length;
+  if (sn === 0) return;
 
-  // grid
-  for(let i=0;i<=5;i++){{
-    const p=pMin+(pr/5)*i,y=py(p);
-    kc.strokeStyle=GR; kc.lineWidth=1;
-    kc.beginPath(); kc.moveTo(PL,y); kc.lineTo(w-PR,y); kc.stroke();
-    kc.fillStyle=MU; kc.font='10px SF Mono,monospace'; kc.textAlign='left';
-    kc.fillText(p.toFixed(1),w-PR+4,y+4);
+  const PL = 10, PR = 56, PT = 16, PB = 26;
+  const cw = w - PL - PR, ch = kh - PT - PB;
+  const gap = cw / sn;
+  const bw  = Math.max(2, Math.min(14, gap - 2));
+
+  const UP = '#26a641', DN = '#f85149', LM = '#ffa500', MU = '#8b949e', GR = '#21262d';
+
+  // ── K 線圖 ──────────────────────────────────────────────────
+  kc.clearRect(0, 0, w, kh);
+
+  const pMin = Math.min(...slice.map(d => d.low))  * 0.995;
+  const pMax = Math.max(...slice.map(d => d.high)) * 1.005;
+  const pr   = pMax - pMin || 1;
+  const py   = v => PT + ch - ((v - pMin) / pr) * ch;
+
+  // 水平格線
+  for (let i = 0; i <= 5; i++) {{
+    const p = pMin + (pr / 5) * i, y = py(p);
+    kc.strokeStyle = GR; kc.lineWidth = 1;
+    kc.beginPath(); kc.moveTo(PL, y); kc.lineTo(w - PR, y); kc.stroke();
+    kc.fillStyle = MU; kc.font = '10px SF Mono,monospace'; kc.textAlign = 'left';
+    kc.fillText(p.toFixed(1), w - PR + 4, y + 4);
   }}
 
-  // date labels
-  const step=Math.max(1,Math.floor(n/6));
-  DATA.forEach((d,i)=>{{
-    if(i%step!==0)return;
-    const x=PL+i*gap+gap/2;
-    kc.fillStyle=MU; kc.font='10px SF Mono,monospace'; kc.textAlign='center';
-    kc.fillText(d.date,x,kh-6);
+  // 日期標籤
+  const step = Math.max(1, Math.floor(sn / 6));
+  slice.forEach((d, i) => {{
+    if (i % step !== 0) return;
+    const x = PL + i * gap + gap / 2;
+    kc.fillStyle = MU; kc.font = '10px SF Mono,monospace'; kc.textAlign = 'center';
+    kc.fillText(d.date, x, kh - 6);
   }});
 
-  // candles
-  DATA.forEach((d,i)=>{{
-    const x=PL+i*gap+gap/2;
-    const col=d.limit?LM:(d.close>=d.open?UP:DN);
-    kc.strokeStyle=col; kc.lineWidth=1;
-    kc.beginPath(); kc.moveTo(x,py(d.high)); kc.lineTo(x,py(d.low)); kc.stroke();
-    const y1=py(Math.max(d.open,d.close)),y2=py(Math.min(d.open,d.close));
-    kc.fillStyle=col; kc.fillRect(x-bw/2,y1,bw,Math.max(1,y2-y1));
-    if(d.limit){{
-      kc.fillStyle=LM; kc.font='bold 11px sans-serif'; kc.textAlign='center';
-      kc.fillText('🔥',x,py(d.high)-6);
+  // K 棒
+  slice.forEach((d, i) => {{
+    const x   = PL + i * gap + gap / 2;
+    const col = d.limit ? LM : (d.close >= d.open ? UP : DN);
+    kc.strokeStyle = col; kc.lineWidth = 1;
+    kc.beginPath(); kc.moveTo(x, py(d.high)); kc.lineTo(x, py(d.low)); kc.stroke();
+    const y1 = py(Math.max(d.open, d.close)), y2 = py(Math.min(d.open, d.close));
+    kc.fillStyle = col;
+    kc.fillRect(x - bw / 2, y1, bw, Math.max(1, y2 - y1));
+    if (d.limit) {{
+      kc.fillStyle = LM; kc.font = 'bold 11px sans-serif'; kc.textAlign = 'center';
+      kc.fillText('🔥', x, py(d.high) - 6);
     }}
   }});
 
   // 均線
   function drawMA(key, color) {{
-    kc.strokeStyle = color;
-    kc.lineWidth   = 1.2;
-    kc.beginPath();
+    kc.strokeStyle = color; kc.lineWidth = 1.2; kc.beginPath();
     let started = false;
-    DATA.forEach((d, i) => {{
+    slice.forEach((d, i) => {{
       if (d[key] === null || d[key] === undefined) {{ started = false; return; }}
-      const x = PL + i * gap + gap / 2;
-      const y = py(d[key]);
-      if (!started) {{ kc.moveTo(x, y); started = true; }}
-      else kc.lineTo(x, y);
+      const x = PL + i * gap + gap / 2, y = py(d[key]);
+      if (!started) {{ kc.moveTo(x, y); started = true; }} else kc.lineTo(x, y);
     }});
     kc.stroke();
   }}
@@ -921,149 +909,275 @@ function draw() {{
   drawMA('ma60',  '#bc8cff');
   drawMA('ma240', '#ff8c42');
 
-  // volume
-  const volMax=Math.max(...DATA.map(d=>d.volume));
-  DATA.forEach((d,i)=>{{
-    const x=PL+i*gap+gap/2;
-    const col=d.limit?LM:(d.close>=d.open?UP:DN);
-    vc.fillStyle=col+'aa';
-    vc.fillRect(x-bw/2,vh-(d.volume/volMax)*(vh-8),bw,(d.volume/volMax)*(vh-8));
+  // 參考線（掛單 / 停損 / 目標）
+  function drawRefLine(val, color, label) {{
+    if (!val || val <= 0) return;
+    const y = py(val);
+    kc.strokeStyle = color + '88'; kc.lineWidth = 1.5; kc.setLineDash([6, 3]);
+    kc.beginPath(); kc.moveTo(PL, y); kc.lineTo(w - PR, y); kc.stroke();
+    kc.setLineDash([]);
+    kc.fillStyle = color; kc.font = 'bold 10px SF Mono,monospace'; kc.textAlign = 'left';
+    kc.fillText(`${{label}} ${{val}}`, w - PR + 4, y - 3);
+  }}
+  drawRefLine(REF_LINES.entry,     '#58a6ff', '掛單');
+  drawRefLine(REF_LINES.stop_loss, '#f85149', '停損');
+  drawRefLine(REF_LINES.target,    '#26a641', '目標');
+
+  // ── 成交量 ──────────────────────────────────────────────────
+  vc.clearRect(0, 0, w, vh);
+  const volMax = Math.max(...slice.map(d => d.volume)) || 1;
+  slice.forEach((d, i) => {{
+    const x   = PL + i * gap + gap / 2;
+    const col = d.limit ? LM : (d.close >= d.open ? UP : DN);
+    vc.fillStyle = col + 'aa';
+    const barH = (d.volume / volMax) * (vh - 8);
+    vc.fillRect(x - bw / 2, vh - barH, bw, barH);
   }});
 
+  // ── KD 指標 ─────────────────────────────────────────────────
+  kdc.clearRect(0, 0, w, kdh);
+  const {{ ks: k_vals, ds: d_vals }} = calcKD(slice);
 
-
-  // KD 指標繪製
-  const kdMU='#8b949e', kdGR='#21262d';
-  // 超買超賣參考線
-  [20, 50, 80].forEach(lv=>{{
-    const y=kdh-(lv/100)*(kdh-4)-2;
-    kdc.strokeStyle= lv===50 ? kdGR : (lv===80?'#f8514944':'#26a64144');
-    kdc.lineWidth=1; kdc.setLineDash([3,3]);
-    kdc.beginPath(); kdc.moveTo(PL,y); kdc.lineTo(w-PR,y); kdc.stroke();
+  [20, 50, 80].forEach(lv => {{
+    const y = kdh - (lv / 100) * (kdh - 4) - 2;
+    kdc.strokeStyle = lv === 50 ? GR : (lv === 80 ? '#f8514944' : '#26a64144');
+    kdc.lineWidth = 1; kdc.setLineDash([3, 3]);
+    kdc.beginPath(); kdc.moveTo(PL, y); kdc.lineTo(w - PR, y); kdc.stroke();
     kdc.setLineDash([]);
-    kdc.fillStyle=kdMU; kdc.font='9px SF Mono,monospace'; kdc.textAlign='left';
-    kdc.fillText(lv, w-PR+4, y+3);
+    kdc.fillStyle = MU; kdc.font = '9px SF Mono,monospace'; kdc.textAlign = 'left';
+    kdc.fillText(lv, w - PR + 4, y + 3);
   }});
-  // K 線
-  kdc.strokeStyle='#f0c040'; kdc.lineWidth=1.2; kdc.beginPath();
-  let kdStarted=false;
-  DATA.forEach((d,i)=>{{
-    if(d.k===null||d.k===undefined){{kdStarted=false;return;}}
-    const x=PL+i*gap+gap/2, y=kdh-(d.k/100)*(kdh-4)-2;
-    if(!kdStarted){{kdc.moveTo(x,y);kdStarted=true;}}else kdc.lineTo(x,y);
-  }}); kdc.stroke();
-  // D 線
-  kdc.strokeStyle='#58a6ff'; kdc.lineWidth=1.2; kdc.beginPath();
-  kdStarted=false;
-  DATA.forEach((d,i)=>{{
-    if(d.d===null||d.d===undefined){{kdStarted=false;return;}}
-    const x=PL+i*gap+gap/2, y=kdh-(d.d/100)*(kdh-4)-2;
-    if(!kdStarted){{kdc.moveTo(x,y);kdStarted=true;}}else kdc.lineTo(x,y);
-  }}); kdc.stroke();
 
-  // 隔日掛單價、停損線 & 目標價線（水平參考線）
-  if(REF_LINES.entry > 0){{
-    const y=py(REF_LINES.entry);
-    kc.strokeStyle='#58a6ff88'; kc.lineWidth=1.5; kc.setLineDash([6,3]);
-    kc.beginPath(); kc.moveTo(PL,y); kc.lineTo(w-PR,y); kc.stroke();
-    kc.setLineDash([]);
-    kc.fillStyle='#58a6ff'; kc.font='bold 10px SF Mono,monospace'; kc.textAlign='left';
-    kc.fillText(`掛單 ${{REF_LINES.entry}}`,w-PR+4,y-3);
+  function drawKDLine(vals, color) {{
+    kdc.strokeStyle = color; kdc.lineWidth = 1.2; kdc.beginPath();
+    let started = false;
+    vals.forEach((v, i) => {{
+      if (v === null) {{ started = false; return; }}
+      const x = PL + i * gap + gap / 2;
+      const y = kdh - (v / 100) * (kdh - 4) - 2;
+      if (!started) {{ kdc.moveTo(x, y); started = true; }} else kdc.lineTo(x, y);
+    }});
+    kdc.stroke();
   }}
-  if(REF_LINES.stop_loss > 0){{
-    const y=py(REF_LINES.stop_loss);
-    kc.strokeStyle='#f8514988'; kc.lineWidth=1.5; kc.setLineDash([6,3]);
-    kc.beginPath(); kc.moveTo(PL,y); kc.lineTo(w-PR,y); kc.stroke();
-    kc.setLineDash([]);
-    kc.fillStyle='#f85149'; kc.font='bold 10px SF Mono,monospace'; kc.textAlign='left';
-    kc.fillText(`停損 ${{REF_LINES.stop_loss}}`,w-PR+4,y-3);
-  }}
-  if(REF_LINES.target > 0){{
-    const y=py(REF_LINES.target);
-    kc.strokeStyle='#26a64188'; kc.lineWidth=1.5; kc.setLineDash([6,3]);
-    kc.beginPath(); kc.moveTo(PL,y); kc.lineTo(w-PR,y); kc.stroke();
-    kc.setLineDash([]);
-    kc.fillStyle='#26a641'; kc.font='bold 10px SF Mono,monospace'; kc.textAlign='left';
-    kc.fillText(`目標 ${{REF_LINES.target}}`,w-PR+4,y-3);
-  }}
+  drawKDLine(k_vals, '#f0c040');
+  drawKDLine(d_vals, '#58a6ff');
 
-  // KD 黃金交叉標記
-  for(let i=1;i<DATA.length;i++){{
-    const prev=DATA[i-1], cur=DATA[i];
-    if(prev.k===null||cur.k===null||prev.d===null||cur.d===null) continue;
-    // 黃金交叉：K 從下穿上 D
-    if(prev.k<=prev.d && cur.k>cur.d){{
-      const x=PL+i*gap+gap/2;
-      const y=kdh-(cur.k/100)*(kdh-4)-2;
-      kdc.fillStyle='#ffd700';
-      kdc.font='bold 10px sans-serif';
-      kdc.textAlign='center';
-      kdc.fillText('★',x,y-6);  // ★
+  // KD 黃金／死亡交叉標記
+  for (let i = 1; i < slice.length; i++) {{
+    const pk = k_vals[i-1], pd = d_vals[i-1], ck = k_vals[i], cd = d_vals[i];
+    if (pk === null || pd === null || ck === null || cd === null) continue;
+    const x = PL + i * gap + gap / 2;
+    const y = kdh - (ck / 100) * (kdh - 4) - 2;
+    if (pk <= pd && ck > cd) {{
+      kdc.fillStyle = '#ffd700'; kdc.font = 'bold 10px sans-serif'; kdc.textAlign = 'center';
+      kdc.fillText('★', x, y - 6);
     }}
-    // 死亡交叉：K 從上穿下 D
-    if(prev.k>=prev.d && cur.k<cur.d){{
-      const x=PL+i*gap+gap/2;
-      const y=kdh-(cur.k/100)*(kdh-4)-2;
-      kdc.fillStyle='#f85149';
-      kdc.font='bold 10px sans-serif';
-      kdc.textAlign='center';
-      kdc.fillText('★',x,y+12);  // ★
+    if (pk >= pd && ck < cd) {{
+      kdc.fillStyle = '#f85149'; kdc.font = 'bold 10px sans-serif'; kdc.textAlign = 'center';
+      kdc.fillText('★', x, y + 12);
     }}
   }}
 
-  // 游標直線 + 資訊列（固定在圖下方，不遮擋 K 線）
-  kcan.onmousemove=e=>{{
-    const r=kcan.getBoundingClientRect();
-    const mx=e.clientX-r.left;
-    const i=Math.round((mx-PL)/gap-0.5);
-    if(i<0||i>=n) return;
-    const d=DATA[i];
-    const col=d.limit?'#ffa500':(d.close>=d.open?'#26a641':'#f85149');
-    const chg=((d.close-d.open)/d.open*100).toFixed(2);
+  // ── 縮略圖導航 ───────────────────────────────────────────────
+  nc.clearRect(0, 0, w, nh);
+  const npMin = Math.min(...DATA.map(d => d.low));
+  const npMax = Math.max(...DATA.map(d => d.high));
+  const npr   = npMax - npMin || 1;
+  const nGap  = w / N;
 
-    // 游標直線（重繪後疊加，三圖同步）
+  // 遮罩：非選取區灰暗
+  nc.fillStyle = 'rgba(0,0,0,0.35)';
+  nc.fillRect(0, 0, viewStart * nGap, nh);
+  nc.fillRect(viewEnd * nGap, 0, w - viewEnd * nGap, nh);
+
+  // 收盤線
+  nc.strokeStyle = '#58a6ff66'; nc.lineWidth = 1; nc.beginPath();
+  DATA.forEach((d, i) => {{
+    const x = i * nGap + nGap / 2;
+    const y = nh - ((d.close - npMin) / npr) * (nh - 4) - 2;
+    i === 0 ? nc.moveTo(x, y) : nc.lineTo(x, y);
+  }});
+  nc.stroke();
+
+  // 選取框
+  const nx1 = viewStart * nGap, nx2 = viewEnd * nGap;
+  nc.strokeStyle = '#58a6ff'; nc.lineWidth = 1.5;
+  nc.strokeRect(nx1, 0, nx2 - nx1, nh);
+
+  // 拖拉把手
+  nc.fillStyle = '#58a6ff';
+  [nx1, nx2].forEach(hx => {{ nc.fillRect(hx - 2, 4, 4, nh - 8); }});
+
+  // ── 游標互動（K 線圖）────────────────────────────────────────
+  kcan.onmousemove = e => {{
+    const r  = kcan.getBoundingClientRect();
+    const mx = e.clientX - r.left;
+    const i  = Math.round((mx - PL) / gap - 0.5);
+    if (i < 0 || i >= sn) return;
+    const d   = slice[i];
+    const col = d.limit ? '#ffa500' : (d.close >= d.open ? '#26a641' : '#f85149');
+    const chg = ((d.close - d.open) / d.open * 100).toFixed(2);
+
+    // 同步游標線（重繪後疊加）
     draw();
-    const cx=PL+i*gap+gap/2;
-    [{{ctx:kc,h:kh,pt:PT,pb:PB}},{{ctx:vc,h:vh,pt:0,pb:0}},{{ctx:kdc,h:kdh,pt:0,pb:0}}].forEach(c=>{{
-      c.ctx.strokeStyle='rgba(255,255,255,0.2)'; c.ctx.lineWidth=1; c.ctx.setLineDash([4,3]);
-      c.ctx.beginPath(); c.ctx.moveTo(cx,c.pt); c.ctx.lineTo(cx,c.h-c.pb); c.ctx.stroke();
+    const cx = PL + i * gap + gap / 2;
+    [{{ ctx:kc, h:kh }}, {{ ctx:vc, h:vh }}, {{ ctx:kdc, h:kdh }}].forEach(c => {{
+      c.ctx.strokeStyle = 'rgba(255,255,255,0.2)'; c.ctx.lineWidth = 1; c.ctx.setLineDash([4, 3]);
+      c.ctx.beginPath(); c.ctx.moveTo(cx, 0); c.ctx.lineTo(cx, c.h); c.ctx.stroke();
       c.ctx.setLineDash([]);
     }});
 
-    tip.innerHTML=
+    document.getElementById('tip').innerHTML =
       `<span style="color:var(--muted)">${{d.date}}</span>` +
-      ` 開<b>${{d.open}}</b>` +
-      ` 高<b>${{d.high}}</b>` +
-      ` 低<b>${{d.low}}</b>` +
-      ` 收<b style="color:${{col}}">${{d.close}}</b><span style="color:${{col}}">(${{chg>0?'+':''}}${{chg}}%)</span>` +
-      ` 量<b>${{(d.volume/1000).toFixed(0)}}K</b>` +
-      (d.ma5   ? ` <span style="color:#f0c040">MA5 <b>${{d.ma5}}</b></span>` : '') +
+      ` 開<b>${{d.open}}</b> 高<b>${{d.high}}</b> 低<b>${{d.low}}</b>` +
+      ` 收<b style="color:${{col}}">${{d.close}}</b><span style="color:${{col}}">(${{chg > 0 ? '+' : ''}}${{chg}}%)</span>` +
+      ` 量<b>${{(d.volume / 1000).toFixed(0)}}K</b>` +
+      (d.ma5   ? ` <span style="color:#f0c040">MA5 <b>${{d.ma5}}</b></span>`   : '') +
       (d.ma10  ? ` <span style="color:#e06080">MA10 <b>${{d.ma10}}</b></span>` : '') +
       (d.ma20  ? ` <span style="color:#58a6ff">MA20 <b>${{d.ma20}}</b></span>` : '') +
       (d.ma60  ? ` <span style="color:#bc8cff">MA60 <b>${{d.ma60}}</b></span>` : '') +
       (d.ma240 ? ` <span style="color:#ff8c42">MA240 <b>${{d.ma240}}</b></span>` : '') +
-      (d.k !== null ? ` <span style="color:#f0c040">K<b>${{d.k}}</b></span>` : '') +
-      (d.d !== null ? ` <span style="color:#58a6ff">D<b>${{d.d}}</b></span>` : '') +
+      (k_vals[i] !== null ? ` <span style="color:#f0c040">K<b>${{k_vals[i]}}</b></span>` : '') +
+      (d_vals[i] !== null ? ` <span style="color:#58a6ff">D<b>${{d_vals[i]}}</b></span>` : '') +
       (d.limit ? ` <span style="color:#ffa500;font-weight:700">🔥漲停</span>` : '');
   }};
-  kcan.onmouseleave=()=>{{
+  kcan.onmouseleave = () => {{
     draw();
-    tip.innerHTML='<span style="color:var(--muted)">← 滑鼠移到 K 線圖查看詳細資訊</span>';
+    document.getElementById('tip').innerHTML =
+      '<span style="color:var(--muted)">← 滑鼠移到 K 線圖查看詳細資訊</span>';
   }};
 }}
 
-draw();
-window.addEventListener('resize',draw);
+// ── 快速區間按鈕 ───────────────────────────────────────────────
+function setRange(days) {{
+  if (days === -1) {{ viewStart = 0; viewEnd = N; }}
+  else {{ viewEnd = N; viewStart = Math.max(0, N - days); }}
+  document.querySelectorAll('.rbtn').forEach(b => b.classList.remove('active'));
+  const el = document.getElementById('rb-' + (days === -1 ? 'all' : days));
+  if (el) el.classList.add('active');
+  draw();
+}}
+
+// ── 滾輪縮放（K 線圖上）──────────────────────────────────────
+document.getElementById('kc').addEventListener('wheel', e => {{
+  e.preventDefault();
+  const sn    = viewEnd - viewStart;
+  const delta = e.deltaY > 0 ? 1 : -1;
+  const zoom  = Math.max(1, Math.floor(sn * 0.1));
+  const mid   = Math.floor((viewStart + viewEnd) / 2);
+  const newSn = Math.max(20, Math.min(N, sn + delta * zoom));
+  let ns = mid - Math.floor(newSn / 2);
+  let ne = ns + newSn;
+  if (ns < 0) {{ ns = 0; ne = newSn; }}
+  if (ne > N) {{ ne = N; ns = Math.max(0, N - newSn); }}
+  viewStart = ns; viewEnd = ne;
+  draw();
+}}, {{ passive: false }});
+
+// ── 縮略圖拖拉（滑鼠）────────────────────────────────────────
+const ncan = document.getElementById('nc');
+
+function getNavMode(mx) {{
+  const nw = ncan.getBoundingClientRect().width;
+  const x1 = viewStart / N * nw;
+  const x2 = viewEnd   / N * nw;
+  if (Math.abs(mx - x1) < 10) return 'left';
+  if (Math.abs(mx - x2) < 10) return 'right';
+  if (mx > x1 && mx < x2)     return 'move';
+  return null;
+}}
+
+ncan.addEventListener('mousedown', e => {{
+  const r  = ncan.getBoundingClientRect();
+  const mx = e.clientX - r.left;
+  _navMode = getNavMode(mx);
+  if (_navMode) {{
+    _isDragging   = true;
+    _navDragX     = mx;
+    _navViewStart = viewStart;
+    _navViewEnd   = viewEnd;
+  }}
+}});
+
+window.addEventListener('mousemove', e => {{
+  if (!_isDragging || !_navMode) return;
+  const r   = ncan.getBoundingClientRect();
+  const mx  = e.clientX - r.left;
+  const dx  = Math.round((mx - _navDragX) / r.width * N);
+  if (_navMode === 'left') {{
+    viewStart = Math.max(0, Math.min(_navViewStart + dx, viewEnd - 20));
+  }} else if (_navMode === 'right') {{
+    viewEnd = Math.max(viewStart + 20, Math.min(N, _navViewEnd + dx));
+  }} else if (_navMode === 'move') {{
+    const span = _navViewEnd - _navViewStart;
+    let ns = _navViewStart + dx, ne = _navViewEnd + dx;
+    if (ns < 0) {{ ns = 0; ne = span; }}
+    if (ne > N) {{ ne = N; ns = N - span; }}
+    viewStart = ns; viewEnd = ne;
+  }}
+  draw();
+}});
+
+window.addEventListener('mouseup', () => {{
+  _isDragging = false;
+  _navMode    = null;
+}});
+
+// 游標樣式
+ncan.addEventListener('mousemove', e => {{
+  const r  = ncan.getBoundingClientRect();
+  const mx = e.clientX - r.left;
+  const m  = getNavMode(mx);
+  ncan.style.cursor = (m === 'left' || m === 'right') ? 'ew-resize' : (m === 'move' ? 'grab' : 'default');
+}});
+
+// ── 縮略圖拖拉（觸控）────────────────────────────────────────
+ncan.addEventListener('touchstart', e => {{
+  const r  = ncan.getBoundingClientRect();
+  const mx = e.touches[0].clientX - r.left;
+  _navMode = getNavMode(mx);
+  if (_navMode) {{
+    _isDragging   = true;
+    _navDragX     = mx;
+    _navViewStart = viewStart;
+    _navViewEnd   = viewEnd;
+  }}
+}}, {{ passive: true }});
+
+ncan.addEventListener('touchmove', e => {{
+  if (!_isDragging || !_navMode) return;
+  const r  = ncan.getBoundingClientRect();
+  const mx = e.touches[0].clientX - r.left;
+  const dx = Math.round((mx - _navDragX) / r.width * N);
+  if (_navMode === 'left') {{
+    viewStart = Math.max(0, Math.min(_navViewStart + dx, viewEnd - 20));
+  }} else if (_navMode === 'right') {{
+    viewEnd = Math.max(viewStart + 20, Math.min(N, _navViewEnd + dx));
+  }} else if (_navMode === 'move') {{
+    const span = _navViewEnd - _navViewStart;
+    let ns = _navViewStart + dx, ne = _navViewEnd + dx;
+    if (ns < 0) {{ ns = 0; ne = span; }}
+    if (ne > N) {{ ne = N; ns = N - span; }}
+    viewStart = ns; viewEnd = ne;
+  }}
+  draw();
+}}, {{ passive: true }});
+
+ncan.addEventListener('touchend', () => {{
+  _isDragging = false;
+  _navMode    = null;
+}});
+
+// ── 初始化 ───────────────────────────────────────────────────
+window.addEventListener('resize', draw);
+setRange(120);   // 預設顯示近 6 個月
 </script>
 </body>
 </html>"""
 
 
-
-
 # ── 股票清單 ─────────────────────────────────────────────────
 def get_list(target=750):
-    """從 TWSE/TPEX OpenAPI 自動抓全市場清單，過濾後取前 target 支"""
     tw_codes  = []
     two_codes = []
 
@@ -1073,7 +1187,6 @@ def get_list(target=750):
             timeout=15)
         for item in r.json():
             code = item.get("Code", "")
-            # 只取純數字4碼（排除ETF、權證等）
             if code.isdigit() and len(code) == 4:
                 tw_codes.append(code)
         print(f"[清單] 上市取得 {len(tw_codes)} 支")
@@ -1092,11 +1205,11 @@ def get_list(target=750):
     except Exception as e:
         print(f"[清單] 上櫃 API 失敗：{e}")
 
-    # 上市取前 450，上櫃取前 300，合計約 750
     tw_codes  = tw_codes[:450]
     two_codes = two_codes[:300]
 
-    result = [f"{c}.TW"  for c in tw_codes] +              [f"{c}.TWO" for c in two_codes]
+    result = [f"{c}.TW"  for c in tw_codes] + \
+             [f"{c}.TWO" for c in two_codes]
 
     print(f"[清單] 合計 {len(result)} 支納入掃描")
     return result
@@ -1109,7 +1222,6 @@ def scan(output_dir="charts", base_url="charts"):
     print("[名稱] 正在抓取中文名稱對照表...")
     name_map = fetch_name_map()
 
-    # 官方產業別為主，手動 industry_map 作為補充/覆蓋較細分類
     official_industry_map = fetch_official_industry_map()
     industry_lookup = official_industry_map.copy()
     industry_lookup.update(industry_map)
@@ -1117,13 +1229,12 @@ def scan(output_dir="charts", base_url="charts"):
 
     stocks      = get_list()
     today       = datetime.now()
-    fetch_start = today - timedelta(days=730)  # 抓兩年資料，K 線圖顯示兩年 + 首次漲停回溯
+    fetch_start = today - timedelta(days=730)
     fetch_end   = today
     results     = []
     total       = len(stocks)
-    price_cache = {}  # 避免同一檔股票重複下載，降低 GitHub Actions 逾時風險
+    price_cache = {}
 
-    # ── 建立產業資料池（修改2）─────────────────────────────────
     print("[產業] 建立產業資料池...")
     industry_data = {}
     for s in stocks:
@@ -1146,7 +1257,6 @@ def scan(output_dir="charts", base_url="charts"):
             continue
     print(f"[產業] 完成，涵蓋 {len(industry_data)} 個產業")
 
-    # 預先計算各產業位階
     industry_stage_cache = {
         ind: get_industry_stage(dfs)
         for ind, dfs in industry_data.items()
@@ -1183,14 +1293,11 @@ def scan(output_dir="charts", base_url="charts"):
             trading_days = close.index
             n_td         = len(trading_days)
 
-            # ── 第一關：前 3~10 個交易日內有「收盤鎖板」漲停 ──
             lo = max(0, n_td - 10)
             hi = max(0, n_td - 3)
             if lo >= hi:
                 continue
 
-            # 計算每天的漲停價（前一天收盤 × 1.1，無條件捨去至小數點後2位）
-            # 收盤價 >= 漲停價 × 0.999 才算收盤鎖板（容許些微誤差）
             limit_close_days = []
             for idx in trading_days[lo:hi]:
                 try:
@@ -1208,7 +1315,6 @@ def scan(output_dir="charts", base_url="charts"):
             if not limit_close_days:
                 continue
 
-            # 同時也計算近三個月所有收盤鎖板日（供首次漲停判斷用）
             all_limit_close = []
             for idx in trading_days:
                 try:
@@ -1225,13 +1331,12 @@ def scan(output_dir="charts", base_url="charts"):
 
             limit_days = pd.DatetimeIndex(limit_close_days)
 
-            # ── 第一關補充：近三個月首次漲停 ──────────────────
             last_limit_date  = limit_days[-1]
             three_months_ago = last_limit_date - pd.DateOffset(months=3)
             prior_limits = [d for d in all_limit_close
                            if d < last_limit_date and d >= three_months_ago]
             if prior_limits:
-                continue  # 前 3 個月內已有漲停，不是首次啟動，跳過
+                continue
 
             limit_vol  = float(volume.loc[last_limit_date])
             limit_low  = float(open_.loc[last_limit_date])
@@ -1240,7 +1345,6 @@ def scan(output_dir="charts", base_url="charts"):
             curr_vol   = float(volume.iloc[-1])
             ma20       = float(close.rolling(20).mean().iloc[-1])
 
-            # ── 第二關：洗盤條件 ──────────────────────────────
             shrink     = curr_vol < limit_vol * 0.5
             hold_low   = curr_price >= limit_low
             above_ma   = curr_price > ma20
@@ -1256,7 +1360,7 @@ def scan(output_dir="charts", base_url="charts"):
                 is_washing = False
 
             if not is_washing:
-                continue  # 不符合洗盤或強勢續攻，跳過
+                continue
 
             vol_ratio_pct = f"{round((curr_vol / limit_vol) * 100)}%"
             days_since    = len([d for d in trading_days if d > last_limit_date])
@@ -1265,7 +1369,6 @@ def scan(output_dir="charts", base_url="charts"):
             market = "上市" if s.endswith(".TW") else "上櫃"
             name   = name_map.get(code, "")
 
-            # 產業分類與位階；未分類股票使用市場位階或個股均線 fallback，避免整欄未知
             industry, industry_stage = resolve_industry_stage(code, df, industry_lookup, industry_stage_cache)
 
             wash_info = {
@@ -1275,10 +1378,8 @@ def scan(output_dir="charts", base_url="charts"):
                 "washing_type": is_washing_type,
             }
 
-            # ── 型態分析 ───────────────────────────────────────
             pattern = analyze_pattern(df, list(limit_days))
 
-            # ── 洗盤加分（加入型態評分）───────────────────────
             wash_score_notes = []
             if shrink:
                 pattern['score'] += 20
@@ -1297,10 +1398,8 @@ def scan(output_dir="charts", base_url="charts"):
                 wash_score_notes.append("❌ 跌破月線，趨勢偏弱")
             pattern['notes'] = wash_score_notes + pattern['notes']
 
-            # ── 新增條件加分 ────────────────────────────────
             extra_notes = []
 
-            # A. 漲停當天量是否放大（>= 前5日均量 1.5 倍）
             try:
                 limit_idx = list(close.index).index(last_limit_date)
                 if limit_idx >= 5:
@@ -1314,7 +1413,6 @@ def scan(output_dir="charts", base_url="charts"):
             except Exception:
                 pass
 
-            # B. 洗盤期間是否連續縮量（漲停後每天都 < 漲停量 50%）
             try:
                 limit_idx = list(close.index).index(last_limit_date)
                 wash_vols = volume.iloc[limit_idx+1:]
@@ -1328,7 +1426,6 @@ def scan(output_dir="charts", base_url="charts"):
             except Exception:
                 pass
 
-            # C. 股價位置（近一年低檔區啟動 vs 高檔區啟動）
             try:
                 year_high = float(close.rolling(min(252, len(close))).max().iloc[-1])
                 year_low  = float(close.rolling(min(252, len(close))).min().iloc[-1])
@@ -1346,7 +1443,6 @@ def scan(output_dir="charts", base_url="charts"):
             except Exception:
                 pass
 
-            # D0. MA60 季線斜率（向上加分）
             try:
                 ma60_series = close.rolling(60).mean()
                 if len(ma60_series.dropna()) >= 10:
@@ -1362,7 +1458,6 @@ def scan(output_dir="charts", base_url="charts"):
             except Exception:
                 pass
 
-            # D. 站上年線（MA240）
             try:
                 ma240 = close.rolling(240).mean()
                 ma240_today = float(ma240.iloc[-1])
@@ -1376,7 +1471,6 @@ def scan(output_dir="charts", base_url="charts"):
             except Exception:
                 pass
 
-            # E. 漲停日是否突破季線（MA60）
             try:
                 ma60 = close.rolling(60).mean()
                 limit_idx   = list(close.index).index(last_limit_date)
@@ -1398,18 +1492,15 @@ def scan(output_dir="charts", base_url="charts"):
 
             pattern['notes'] = extra_notes + pattern['notes']
 
-            # 修改4：產業位階加減分
             stage_bonus = {"復甦初期": 20, "成長中期": 10, "高檔成熟": -10, "衰退期": -20}.get(industry_stage, 0)
             if stage_bonus != 0:
                 pattern['score'] += stage_bonus
                 stage_emoji = "✅" if stage_bonus > 0 else "❌"
                 pattern['notes'].insert(0, f"{stage_emoji} 產業位階：{industry_stage}（{'+' if stage_bonus>0 else ''}{stage_bonus} 分）")
 
-            # 重新計算評分等級（滿分約 217 分）
             ps = pattern['score']
             pattern['grade'] = "🔥🔥 極強" if ps >= 140 else "🔥 強" if ps >= 100 else "⚠️ 普通" if ps >= 60 else "❌ 弱"
 
-            # ── 修改4：是否突破洗盤區間 + 突破強度 + 停損參考價 ──
             wash_high = 0
             wash_low = 0
             is_breakout = False
@@ -1421,10 +1512,9 @@ def scan(output_dir="charts", base_url="charts"):
                 wash_highs = df['High'].iloc[limit_idx+1:-1]
                 wash_lows  = df['Low'].iloc[limit_idx+1:-1]
 
-                # 修改2：至少2天洗盤才算有效
                 if len(wash_highs) >= 2:
                     wash_high   = float(wash_highs.max())
-                    wash_low    = float(wash_lows.min())  # 修改4：停損參考價
+                    wash_low    = float(wash_lows.min())
                     today_close = float(close.iloc[-1])
                     is_breakout = today_close > wash_high
                     if is_breakout:
@@ -1451,8 +1541,6 @@ def scan(output_dir="charts", base_url="charts"):
                 breakout_str       = "-"
                 wash_low           = 0
 
-
-            # KD 共振計算
             try:
                 kd_series = []
                 prev_k2, prev_d2 = 50.0, 50.0
@@ -1478,9 +1566,6 @@ def scan(output_dir="charts", base_url="charts"):
             except Exception:
                 kd_golden = False
 
-            # ── 隔日掛單參考（供隔日下單，不作為當日追價）────────────
-            # 洗盤中：隔日採「突破掛單」，觸價才進場；未觸價不買。
-            # 已突破：不建議隔日追高，改以「回測突破價不破」作為觀察價。
             next_order_price = round(wash_high * 1.01, 2) if wash_high else "-"
             pullback_ref = round(wash_high, 2) if (is_breakout and wash_high) else "-"
             stop_loss_ref = round(wash_low, 2) if wash_low else "-"
@@ -1515,11 +1600,9 @@ def scan(output_dir="charts", base_url="charts"):
             dates = [d.strftime('%m/%d') for d in limit_days]
             stage_color = '#26a641' if industry_stage in ['復甦初期', '成長中期'] else '#f85149' if industry_stage == '衰退期' else '#ffa500'
 
-            # ── 歷史回測統計（單檔）────────────────────────────
             bt = backtest_strategy(df)
             bt_samples = bt.get("samples", 0)
 
-            # ── 產生 K 線圖 ────────────────────────────────────
             chart_file = os.path.join(output_dir, f"{code}.html")
             chart_link = f"{base_url}/{code}.html"
             with open(chart_file, "w", encoding="utf-8") as f:
@@ -1579,7 +1662,6 @@ def to_html(df, output_file="index.html"):
     t = (datetime.utcnow() + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
 
     if not df.empty:
-        # 拆成兩區塊：已突破 / 洗盤中
         df_break = df[df['突破洗盤'] != '-'].sort_values(['_score', '_vol_num'], ascending=[False, True]).drop(columns=['_score', '_vol_num'])
         df_watch = df[df['突破洗盤'] == '-'].sort_values(['_score', '_vol_num'], ascending=[False, True]).drop(columns=['_score', '_vol_num'])
 
@@ -1660,6 +1742,5 @@ def to_html(df, output_file="index.html"):
 
 # ── 入口 ─────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # GitHub Pages 部署時 charts/ 資料夾在同層，相對路徑即可
     df = scan(output_dir="charts", base_url="./charts")
     to_html(df, output_file="index.html")
