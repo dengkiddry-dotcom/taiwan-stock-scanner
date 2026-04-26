@@ -1263,7 +1263,25 @@ def scan(output_dir="charts", base_url="charts"):
     }
     print("[產業] 位階快取：" + ", ".join(f"{k}={v}" for k, v in sorted(industry_stage_cache.items())))
 
-    print(f"[掃描] 共 {total} 支，雙名單：A觀察名單（2~10天整理）+ B二波確認（今日再漲停）")
+    # ── 基準日：用最後一筆交易日，支援週末／假日執行 ──────────
+    # 先抓一支主力股確認最後交易日
+    _ref_last_day = None
+    try:
+        _ref_df = yf.download("^TWII", start=today - timedelta(days=10), end=today + timedelta(days=1), progress=False)
+        if not _ref_df.empty:
+            if isinstance(_ref_df.columns, pd.MultiIndex):
+                _ref_df.columns = _ref_df.columns.get_level_values(0)
+            _ref_last_day = _ref_df.index[-1]
+    except Exception:
+        pass
+
+    if _ref_last_day is not None:
+        weekday_name = _ref_last_day.strftime('%A')
+        print(f"[基準日] 最後交易日：{_ref_last_day.strftime('%Y-%m-%d')} ({weekday_name})")
+    else:
+        print("[基準日] 無法確認最後交易日，以各股最後一筆為準")
+
+    print(f"[掃描] 共 {total} 支，雙名單：A觀察名單（1~10天整理）+ B二波確認（今日再漲停）")
 
     for i, s in enumerate(stocks):
         try:
@@ -1341,7 +1359,7 @@ def scan(output_dir="charts", base_url="charts"):
             first_limit_price_val = None
             first_limit_close_val = None
 
-            search_range = range(3, 13)   # 最大支援 10 天整理
+            search_range = range(2, 13)   # BUG-07：從2開始，支援整理1天（週末邊界）
             for offset in search_range:
                 candidate_iloc = today_iloc - offset
                 if candidate_iloc <= 0:
@@ -1370,11 +1388,12 @@ def scan(output_dir="charts", base_url="charts"):
                 continue
 
             # ── 整理天數（首漲停後到今日前，不含今日）───────────────
+            # BUG-07：下限改成 1，週末執行時最後交易日可能整理僅1天
             wash_idxs       = list(range(first_limit_iloc + 1, today_iloc))
             wash_days_count = len(wash_idxs)
 
-            if wash_days_count < 2:
-                continue   # 至少整理2天
+            if wash_days_count < 1:
+                continue   # 至少整理1天（首漲停當天不算）
 
             # ── 判斷名單類型 ──────────────────────────────────────────
             is_list_b = today_is_limit and wash_days_count <= 6
@@ -1421,7 +1440,7 @@ def scan(output_dir="charts", base_url="charts"):
                 # A1：整理期收盤在漲停價 ±8% 以內（放寬）
                 band_lo_a = first_limit_price_val * 0.92
                 band_hi_a = first_limit_price_val * 1.08
-                if not all(band_lo_a <= wc <= band_hi_a for wc in wash_closes):
+                if wash_closes and not all(band_lo_a <= wc <= band_hi_a for wc in wash_closes):
                     continue
 
                 # A2：今日收盤距漲停收盤不超過 -12%
@@ -1429,17 +1448,18 @@ def scan(output_dir="charts", base_url="charts"):
                     continue
 
                 # A3：BUG-01修正 — 整理期平均量 < 首波70%（放寬，不逐天卡死）
-                avg_wash_vol = sum(wash_vols) / len(wash_vols) if wash_vols else limit_vol
-                if avg_wash_vol >= limit_vol * 0.70:
+                #     wash_closes 為空（整理1天且今日就是整理日）時跳過此條
+                avg_wash_vol = sum(wash_vols) / len(wash_vols) if wash_vols else 0
+                if avg_wash_vol > 0 and avg_wash_vol >= limit_vol * 0.70:
                     continue
 
                 # A4：BUG-03修正 — 整理期收盤不破首漲停日最低價
-                if not all(wc >= limit_low for wc in wash_closes):
+                if wash_closes and not all(wc >= limit_low for wc in wash_closes):
                     continue
                 if today_close < limit_low:
                     continue
 
-                # A5：今日站上 MA5
+                # A5：今日站上 MA5（週末時 MA5 以最後交易日計算，正常）
                 if today_close < ma5:
                     continue
 
@@ -1481,11 +1501,11 @@ def scan(output_dir="charts", base_url="charts"):
                 # B1：整理期收盤在漲停價 ±5% 以內
                 band_lo_b = first_limit_price_val * 0.95
                 band_hi_b = first_limit_price_val * 1.05
-                if not all(band_lo_b <= wc <= band_hi_b for wc in wash_closes):
+                if wash_closes and not all(band_lo_b <= wc <= band_hi_b for wc in wash_closes):
                     continue
 
                 # B2：整理期收盤不破首漲停日最低價
-                if not all(wc >= limit_low for wc in wash_closes):
+                if wash_closes and not all(wc >= limit_low for wc in wash_closes):
                     continue
 
                 tier       = "🔥 二波確認"
@@ -1538,9 +1558,12 @@ def scan(output_dir="charts", base_url="charts"):
                     wash_score_notes.append("🟡 整理中，等待靠近突破位再動")
 
             # ── 整理天數加分 ──────────────────────────────────────────
-            if 2 <= wash_days_count <= 3:
+            if wash_days_count <= 1:
+                pattern['score'] += 30
+                wash_score_notes.append(f"✅ 整理僅 {wash_days_count} 天，超急洗型，主力強力鎖碼")
+            elif wash_days_count <= 3:
                 pattern['score'] += 25
-                wash_score_notes.append(f"✅ 整理僅 {wash_days_count} 天，急洗急噴型，控盤力強")
+                wash_score_notes.append(f"✅ 整理 {wash_days_count} 天，急洗急噴型，控盤力強")
             elif wash_days_count <= 5:
                 pattern['score'] += 15
                 wash_score_notes.append(f"✅ 整理 {wash_days_count} 天，節奏標準")
