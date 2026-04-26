@@ -6,6 +6,9 @@ import time
 import os
 import json
 
+# ── 全域開關 ─────────────────────────────────────────────────
+RUN_BACKTEST = False   # True=開啟回測（慢）False=關閉（快）
+
 # ── 產業分類對照表 ───────────────────────────────────────────
 industry_map = {
     # 半導體
@@ -782,7 +785,7 @@ def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, pat
 <!-- 洗盤指標 -->
 <div class="card" style="margin-bottom:14px;font-size:.85rem;line-height:2.2">
   <div class="s-label">洗盤指標</div>
-  今日量 / 漲停量：<b>{vol_ratio}</b>（&lt;50% 視為縮量）&nbsp;&nbsp;
+  最後交易日量 / 漲停量：<b>{vol_ratio}</b>（&lt;50% 視為縮量）&nbsp;&nbsp;
   {ma20_ok}&nbsp;&nbsp;{hold_low}
   <div class="ma-row">
     <span class="ma-item">MA5：{ma5}</span>
@@ -1599,7 +1602,7 @@ def scan(output_dir="charts", base_url="charts"):
             )
             is_continuous_shrink = shrink_breaks <= 1
 
-            # ── 今日量能比 ────────────────────────────────────────────
+            # ── 最後交易日量能比 ────────────────────────────────────────────
             today_vol_ratio = today_vol / limit_vol if limit_vol > 0 else 1
             today_vol_heavy = today_vol_ratio >= 0.8   # 今日量 >= 首波80% 視為偏大
 
@@ -1629,9 +1632,10 @@ def scan(output_dir="charts", base_url="charts"):
                 if today_close < limit_low:
                     continue
 
-                # FIX-10：硬條件只保留站上 MA20，MA5 改為加分項
+                # FIX-10：硬條件只保留站上 MA20
                 if not above_ma:
-                    continue   # 跌破月線才淘汰（MA5 不作硬條件）
+                    continue   # 跌破月線才淘汰
+                # MA5 已移出硬條件，改為評分加分項（見 wash_score_notes）
 
                 # A6：整理期間無第二根漲停（確保尚未發動）
                 wash_second_limit = False
@@ -1733,7 +1737,7 @@ def scan(output_dir="charts", base_url="charts"):
                 # 名單A 三層加分
                 if tier_key == 1:
                     pattern['score'] += 25
-                    wash_score_notes.append("🟢 今日收盤突破整理高點，明日可能發動")
+                    wash_score_notes.append("🟢 最後交易日收盤突破整理高點，明日可能發動")
                 elif tier_key == 2:
                     pattern['score'] += 15
                     wash_score_notes.append("🔴 靠近突破位（≥97%），可小量卡位")
@@ -1761,13 +1765,13 @@ def scan(output_dir="charts", base_url="charts"):
             else:
                 wash_score_notes.append("⚠️ 整理期量能不穩，有出貨嫌疑")
 
-            # ── 今日量能 ──────────────────────────────────────────────
+            # ── 最後交易日量能 ──────────────────────────────────────────────
             vol_pct_of_limit = round(today_vol / limit_vol * 100) if limit_vol > 0 else 0
             if not today_vol_heavy:
                 pattern['score'] += 10
-                wash_score_notes.append(f"✅ 今日縮量（首波 {vol_pct_of_limit}%），無出貨跡象")
+                wash_score_notes.append(f"✅ 最後交易日縮量（首波 {vol_pct_of_limit}%），無出貨跡象")
             else:
-                wash_score_notes.append(f"⚠️ 今日量偏大（首波 {vol_pct_of_limit}%），需觀察是否出貨")
+                wash_score_notes.append(f"⚠️ 最後交易日量偏大（首波 {vol_pct_of_limit}%），需觀察是否出貨")
 
             # ── 整理均價與漲停價偏離度（越貼越強）───────────────────
             avg_wash_close = sum(wash_close_list) / len(wash_close_list)
@@ -1782,13 +1786,16 @@ def scan(output_dir="charts", base_url="charts"):
                 pattern['score'] += 3
                 wash_score_notes.append(f"⚠️ 整理均價偏離漲停價 {deviation_pct:.1f}%，整理位置偏低")
 
-            # ── 均線多頭排列 ──────────────────────────────────────────
+            # ── 均線多頭排列（MA5 改為加分項，非硬條件）────────────
             if ma_bullish:
                 pattern['score'] += 15
                 wash_score_notes.append("✅ 均線完整多頭排列（價>MA5>MA10>MA20），趨勢強")
+            elif today_close > ma5:
+                pattern['score'] += 8
+                wash_score_notes.append("✅ 最後交易日站上MA5，短線偏多")
             elif above_ma:
-                pattern['score'] += 5
-                wash_score_notes.append("⚠️ 站上月線但均線排列不完整，趨勢偏多")
+                pattern['score'] += 3
+                wash_score_notes.append("⚠️ 站上月線但低於MA5，整理中")
 
             pattern['notes'] = wash_score_notes + pattern['notes']
 
@@ -1970,7 +1977,7 @@ def scan(output_dir="charts", base_url="charts"):
             if list_type == "B":
                 order_type    = "二波確認"
                 order_display = round(wash_high_close, 2) if wash_high_close else entry_ref
-                order_note    = f"{vol_warning}今日二波漲停；明日勿追，等回測整理高點不破再進場"
+                order_note    = f"{vol_warning}最後交易日二波漲停；明日勿追，等回測整理高點不破再進場"
             elif tier_key == 1:   # 靠近突破
                 order_type    = "突破掛單"
                 order_display = round(wash_high_close * 1.005, 2) if wash_high_close else entry_ref
@@ -1993,7 +2000,13 @@ def scan(output_dir="charts", base_url="charts"):
             dates = [d.strftime('%m/%d') for d in limit_days]
             stage_color = '#26a641' if industry_stage in ['復甦初期', '成長中期'] else '#f85149' if industry_stage == '衰退期' else '#ffa500'
 
-            bt = backtest_strategy(df)
+            # 回測開關（RUN_BACKTEST=False 時跳過，大幅加速）
+            if RUN_BACKTEST:
+                bt = backtest_strategy(df)
+            else:
+                bt = {"samples": 0, "win_5": None, "avg_5": None,
+                      "win_10": None, "avg_10": None, "mdd_10": None,
+                      "win_20": None, "avg_20": None}
             bt_samples = bt.get("samples", 0)
 
             chart_file = os.path.join(output_dir, f"{code}.html")
@@ -2156,8 +2169,8 @@ def to_html(df, output_file="index.html", market_status=None):
   {count_info}
   <div class="hint">
     <b>💡 選股邏輯（兩張名單）</b><br>
-    📋 <b>觀察名單</b>：首漲停後整理 1~10 個交易日，收盤在漲停價 ±8% 內，整理均量 &lt; 首波70%，守住漲停日最低價，今日站上MA5，尚未二波<br>
-    🔥 <b>二波確認</b>：首漲停後整理 1~6 個交易日，收盤在漲停價 ±5% 內，今日再度漲停（事後確認）<br>
+    📋 <b>觀察名單</b>：首漲停後整理 1~10 個交易日，收盤在漲停價 ±8% 內，整理均量 &lt; 首波70%，守住漲停日最低價，尚未二波（MA5 為加分項）<br>
+    🔥 <b>二波確認</b>：首漲停後整理 1~6 個交易日，收盤在漲停價 ±5% 內，最後交易日再度漲停（事後確認）<br>
     四層輸出：🔥 二波確認 ／ 🟢 靠近突破 ／ 🔴 卡位觀察 ／ 🟡 整理中<br>
     分級：A+ 量縮嚴格＋多頭排列＋成長產業 ／ A 量縮守位 ／ B 基本通過<br>
     雙停損：積極停損=整理低點 ／ 防守停損=首漲停最低價<br>
