@@ -110,7 +110,7 @@ def get_industry_stage(industry_dfs: list, industry_name: str = "") -> str:
 
     # FIX-17：樣本不足直接回傳
     if len(industry_dfs) < 5:
-        return "樣本不足"
+        return "盤整過渡"   # FIX-17修正：小產業不直接忽略，以盤整過渡計算
 
     above_ma20 = above_ma60 = above_ma240 = 0
     above_ma20_prev = 0   # FIX-18：10日前的廣度
@@ -413,29 +413,22 @@ def backtest_strategy(df: pd.DataFrame, horizons=(5, 10, 20)) -> dict:
             if limit_vol <= 0 or pd.isna(ma20_val):
                 continue
 
-            # FIX-01：洗盤三條件
-            shrink   = curr_vol < limit_vol * 0.5
-            hold_low = curr_price >= limit_low
-            above_ma = curr_price > ma20_val
-            if not (shrink and hold_low and above_ma):
+            # 掃描階段：保留兩個最低結構條件
+            above_ma  = curr_price > ma20_val
+            hold_low  = curr_price >= limit_low * 0.98   # 守住起漲低點（2%緩衝）
+            if not (above_ma and hold_low):
                 continue
 
-            # FIX-06：訊號去重
-            if signal_positions and cur_i - signal_positions[-1][0] < 10:
+            # 訊號去重：5天內不重複
+            if signal_positions and cur_i - signal_positions[-1][0] < 5:
                 continue
 
-            # FIX-12：計算掛單價，判斷隔天是否成交
+            # 計算掛單價（整理期最高收盤 × 1.005）
             wash_closes_bt = [float(close.iloc[j]) for j in range(last_limit_i + 1, cur_i + 1)]
             wash_high_c    = max(wash_closes_bt) if wash_closes_bt else curr_price
             entry_price    = round(wash_high_c * 1.005, 2)
 
-            next_i     = cur_i + 1
-            next_low   = float(low.iloc[next_i])
-            next_high  = float(high.iloc[next_i])
-
-            if not (next_low <= entry_price <= next_high):
-                continue   # 掛單未成交，不計入
-
+            # 先記錄候選訊號
             signal_positions.append((cur_i, entry_price))
 
         if not signal_positions:
@@ -447,14 +440,19 @@ def backtest_strategy(df: pd.DataFrame, horizons=(5, 10, 20)) -> dict:
             returns   = []
             drawdowns = []
             for (pos, ep) in signal_positions:
-                end_i = pos + 1 + h   # 進場隔天算起 h 天後
-                if end_i >= len(close):
-                    continue
-                if ep <= 0:
-                    continue
-                future = close.iloc[pos + 2: end_i + 1].astype(float)
-                if future.empty:
-                    continue
+                next_i = pos + 1
+                if next_i >= len(close): continue
+                # 回測才判斷掛單是否成交
+                next_low_v  = float(low.iloc[next_i])
+                next_high_v = float(high.iloc[next_i])
+                if not (next_low_v <= ep <= next_high_v):
+                    continue   # 掛單未觸及，跳過這筆
+
+                end_i = next_i + h
+                if end_i >= len(close): continue
+                if ep <= 0: continue
+                future = close.iloc[next_i + 1: end_i + 1].astype(float)
+                if future.empty: continue
                 ret = float(close.iloc[end_i]) / ep - 1
                 mdd = float(future.min()) / ep - 1
                 returns.append(ret)
@@ -1349,11 +1347,9 @@ def scan(output_dir="charts", base_url="charts"):
         for ind, dfs in industry_data.items()
     }
 
-    # FIX-20：龍頭股狀態加權 — 龍頭跌破 MA20 → 產業強制降一級
-    _stage_order = ["衰退期", "盤整過渡", "高檔成熟", "復甦初期", "成長中期", "高檔過熱"]
+    # FIX-20 修正：龍頭股改成評分加減分，不強制降級（避免錯過 early move）
+    leader_score_adj = {}   # {產業名稱: 加減分}
     for ind, leader_code in INDUSTRY_LEADERS.items():
-        if ind not in industry_stage_cache:
-            continue
         leader_sym = f"{leader_code}.TW"
         try:
             _ldf = price_cache.get(leader_sym)
@@ -1364,13 +1360,11 @@ def scan(output_dir="charts", base_url="charts"):
             _lc   = _ldf["Close"].squeeze().astype(float)
             _curr = float(_lc.iloc[-1])
             _ma20 = float(_lc.rolling(20).mean().iloc[-1])
-            if _curr < _ma20:   # 龍頭跌破月線 → 降一級
-                cur_stage = industry_stage_cache[ind]
-                if cur_stage in _stage_order:
-                    idx = _stage_order.index(cur_stage)
-                    if idx > 0:
-                        industry_stage_cache[ind] = _stage_order[idx - 1]
-                        print(f"[產業] FIX-20 {ind} 龍頭{leader_code}跌破MA20，位階降級：{cur_stage}→{industry_stage_cache[ind]}")
+            if _curr < _ma20:
+                leader_score_adj[ind] = -10
+                print(f"[產業] FIX-20 {ind} 龍頭{leader_code}跌破MA20，評分-10")
+            else:
+                leader_score_adj[ind] = 0
         except Exception:
             continue
 
@@ -1422,7 +1416,12 @@ def scan(output_dir="charts", base_url="charts"):
         market_warn = 0
         print("[大盤] ❓ 大盤狀態無法確認，不調整評分")
 
-    print(f"[掃描] 共 {total} 支，雙名單：A觀察名單（1~10交易日整理）+ B二波確認（今日再漲停）")
+    print(f"[掃描] 共 {total} 支，雙名單：A觀察名單（1~15交易日整理）+ B二波確認（最後交易日再漲停）")
+
+    # 淘汰原因統計
+    reject = {}
+    def mark(reason):
+        reject[reason] = reject.get(reason, 0) + 1
 
     for i, s in enumerate(stocks):
         try:
@@ -1500,7 +1499,7 @@ def scan(output_dir="charts", base_url="charts"):
             first_limit_price_val = None
             first_limit_close_val = None
 
-            search_range = range(2, 13)   # BUG-07：從2開始，支援整理1天（週末邊界）
+            search_range = range(2, 18)   # 放寬：支援整理最多15天（週末邊界保留）
             for offset in search_range:
                 candidate_iloc = today_iloc - offset
                 if candidate_iloc <= 0:
@@ -1519,7 +1518,7 @@ def scan(output_dir="charts", base_url="charts"):
                     continue
 
             if first_limit_date is None:
-                continue
+                mark("找不到首次漲停"); continue
 
             # ── 近三個月內首次漲停（63 個交易日）────────────────────
             # 用 iloc 往前找 63 個交易日，不用 calendar DateOffset
@@ -1528,7 +1527,7 @@ def scan(output_dir="charts", base_url="charts"):
             prior_limits = [d for d in all_limit_close
                             if trading_days[lookback_start_iloc] <= d < first_limit_date]
             if prior_limits:
-                continue
+                mark("近63日有前例漲停"); continue
 
             # ── 整理天數（首漲停後到今日前，不含今日）───────────────
             # BUG-07：下限改成 1，週末執行時最後交易日可能整理僅1天
@@ -1536,14 +1535,14 @@ def scan(output_dir="charts", base_url="charts"):
             wash_days_count = len(wash_idxs)
 
             if wash_days_count < 1:
-                continue   # 至少整理1天（首漲停當天不算）
+                mark("整理天數不足1天"); continue
 
             # ── 判斷名單類型 ──────────────────────────────────────────
             is_list_b = today_is_limit and wash_days_count <= 6
-            is_list_a = not today_is_limit and wash_days_count <= 10
+            is_list_a = not today_is_limit and wash_days_count <= 15   # 放寬：10→15交易日
 
             if not is_list_a and not is_list_b:
-                continue
+                mark("整理天數超過上限"); continue
 
             # ══════════════════════════════════════════════════════════
             # 共用基礎變數
@@ -1565,21 +1564,26 @@ def scan(output_dir="charts", base_url="charts"):
             above_ma   = today_close > ma20
             ma_bullish = today_close > ma5 > ma10 > ma20
 
+            # shrink（縮量）只當加分，不做硬門檻
+            # 整理期均量 < 首波80% 視為縮量
+            avg_wash_vol_val = sum(wash_vols) / len(wash_vols) if wash_vols else limit_vol
+            shrink = avg_wash_vol_val < limit_vol * 0.80
+
             # FIX-11：整理期破底兩層判斷
             #   第一層：盤中最多容忍跌破 3%（超過代表籌碼鬆動）
             if wash_lows_day and wash_period_low < limit_low * 0.97:
-                continue
-            #   第二層：整理期每天收盤不能跌破首漲停最低價
-            if wash_closes and any(wc < limit_low for wc in wash_closes):
-                continue
-            if today_close < limit_low:
-                continue
+                mark("盤中破底超過3%"); continue
+            #   第二層：整理期每天收盤不能跌破首漲停最低價 × 98%（放寬2%緩衝）
+            if wash_closes and any(wc < limit_low * 0.98 for wc in wash_closes):
+                mark("整理期收盤破低點(>2%)"); continue
+            if today_close < limit_low * 0.98:
+                mark("最後交易日收盤破低點(>2%)"); continue
 
             # FIX-03：整理震盪幅度 > 15% 代表主力未控盤，淘汰
             if wash_highs_day and wash_lows_day and limit_low > 0:
                 volatility = (wash_period_high - wash_period_low) / limit_low
                 if volatility > 0.15:
-                    continue
+                    mark("震盪幅度>15%"); continue
 
             # FIX-13：流動性濾網（冷門股跳過，隔天進出困難）
             avg20_vol    = float(close.rolling(20).count().iloc[-1])   # placeholder先用count
@@ -1589,11 +1593,11 @@ def scan(output_dir="charts", base_url="charts"):
                 avg20_vol    = float(_vol_s.rolling(20).mean().iloc[-1])
                 avg20_amount = float((_cls_s * _vol_s).rolling(20).mean().iloc[-1])
                 if avg20_vol < 300_000:
-                    continue   # FIX-22：日均量 < 30萬股，流動性不足
+                    mark("流動性不足(量)"); continue
                 if avg20_amount < 20_000_000:
-                    continue   # FIX-22：日均成交額 < 2000萬，流動性不足
+                    mark("流動性不足(額)"); continue
             except Exception:
-                continue   # FIX-23：資料有問題直接跳過，不讓問題股通過
+                mark("流動性資料異常"); continue
 
             # ── 連續縮量（評分用）────────────────────────────────────
             shrink_breaks = sum(
@@ -1610,31 +1614,31 @@ def scan(output_dir="charts", base_url="charts"):
             # 名單A：明日觀察名單 — 尚未二波，等待發動
             # ══════════════════════════════════════════════════════════
             if is_list_a:
-                # A1：整理期收盤在漲停價 ±8% 以內（放寬）
-                band_lo_a = first_limit_price_val * 0.92
-                band_hi_a = first_limit_price_val * 1.08
+                # A1：整理期收盤在漲停價 ±15% 以內（放寬）
+                band_lo_a = first_limit_price_val * 0.85
+                band_hi_a = first_limit_price_val * 1.15
                 if wash_closes and not all(band_lo_a <= wc <= band_hi_a for wc in wash_closes):
-                    continue
+                    mark("A整理收盤超出±15%"); continue
 
                 # A2：今日收盤距漲停收盤不超過 -12%
                 if today_close < first_limit_close_val * 0.88:
-                    continue
+                    mark("A最後日跌幅超12%"); continue
 
                 # A3：BUG-01修正 — 整理期平均量 < 首波70%（放寬，不逐天卡死）
                 #     wash_closes 為空（整理1天且今日就是整理日）時跳過此條
                 avg_wash_vol = sum(wash_vols) / len(wash_vols) if wash_vols else 0
-                if avg_wash_vol > 0 and avg_wash_vol >= limit_vol * 0.70:
-                    continue
+                if avg_wash_vol > 0 and avg_wash_vol >= limit_vol * 0.90:
+                    mark("A量縮不足(均量>=90%)"); continue   # 放寬：0.70→0.90
 
-                # A4：BUG-03修正 — 整理期收盤不破首漲停日最低價
-                if wash_closes and not all(wc >= limit_low for wc in wash_closes):
-                    continue
-                if today_close < limit_low:
-                    continue
+                # A4：整理期收盤不破首漲停最低價 × 98%（與共用條件一致）
+                if wash_closes and not all(wc >= limit_low * 0.98 for wc in wash_closes):
+                    mark("A整理收盤破低點(>2%)"); continue
+                if today_close < limit_low * 0.98:
+                    mark("A最後日收盤破低點(>2%)"); continue
 
                 # FIX-10：硬條件只保留站上 MA20
                 if not above_ma:
-                    continue   # 跌破月線才淘汰
+                    mark("A跌破月線MA20"); continue
                 # MA5 已移出硬條件，改為評分加分項（見 wash_score_notes）
 
                 # A6：整理期間無第二根漲停（確保尚未發動）
@@ -1649,7 +1653,7 @@ def scan(output_dir="charts", base_url="charts"):
                     except Exception:
                         continue
                 if wash_second_limit:
-                    continue
+                    mark("A整理期已有二波漲停"); continue
 
                 # ── 三層分級（名單A）────────────────────────────────
                 is_confirmed  = today_close > wash_high_close
@@ -1688,11 +1692,11 @@ def scan(output_dir="charts", base_url="charts"):
                 band_lo_b = first_limit_price_val * 0.95
                 band_hi_b = first_limit_price_val * 1.05
                 if wash_closes and not all(band_lo_b <= wc <= band_hi_b for wc in wash_closes):
-                    continue
+                    mark("B整理收盤超出±5%"); continue
 
                 # B2：整理期收盤不破首漲停日最低價
                 if wash_closes and not all(wc >= limit_low for wc in wash_closes):
-                    continue
+                    mark("B整理收盤破低點"); continue
 
                 tier       = "🔥 二波確認"
                 tier_key   = 0   # 最優先
@@ -1757,6 +1761,13 @@ def scan(output_dir="charts", base_url="charts"):
             else:
                 pattern['score'] += 5
                 wash_score_notes.append(f"⚠️ 整理 {wash_days_count} 個交易日，熱度略散")
+
+            # ── 縮量加分（shrink 只當加分，不做硬條件）─────────────
+            if shrink:
+                pattern['score'] += 10
+                wash_score_notes.append(f"✅ 整理均量縮至首波 {round(avg_wash_vol_val/limit_vol*100)}%，量縮蓄勢")
+            else:
+                wash_score_notes.append(f"⚠️ 整理均量 {round(avg_wash_vol_val/limit_vol*100)}%，量縮不明顯")
 
             # ── 連續縮量加分 ──────────────────────────────────────────
             if is_continuous_shrink:
@@ -1899,11 +1910,15 @@ def scan(output_dir="charts", base_url="charts"):
 
             pattern['notes'] = extra_notes + pattern['notes']
 
-            stage_bonus = {"復甦初期": 20, "成長中期": 10, "盤整過渡": 0, "高檔過熱": -10, "高檔成熟": -10, "衰退期": -10, "樣本不足": 0, "未知": 0}.get(industry_stage, 0)
-            if stage_bonus != 0:
-                pattern['score'] += stage_bonus
-                stage_emoji = "✅" if stage_bonus > 0 else "❌"
-                pattern['notes'].insert(0, f"{stage_emoji} 產業位階：{industry_stage}（{'+' if stage_bonus>0 else ''}{stage_bonus} 分）")
+            stage_bonus = {"復甦初期": 20, "成長中期": 10, "盤整過渡": 0, "高檔過熱": -10, "高檔成熟": -10, "衰退期": -10, "盤整過渡": 0, "未知": 0}.get(industry_stage, 0)
+            # FIX-20：龍頭股加減分
+            leader_adj = leader_score_adj.get(industry, 0)
+            total_stage_bonus = stage_bonus + leader_adj
+            if total_stage_bonus != 0:
+                pattern['score'] += total_stage_bonus
+                stage_emoji = "✅" if total_stage_bonus > 0 else "❌"
+                leader_note = f"｜龍頭{leader_adj:+d}" if leader_adj != 0 else ""
+                pattern['notes'].insert(0, f"{stage_emoji} 產業位階：{industry_stage}（{'+' if total_stage_bonus>0 else ''}{total_stage_bonus} 分{leader_note}）")
 
             ps = pattern['score']
 
@@ -2064,6 +2079,11 @@ def scan(output_dir="charts", base_url="charts"):
             continue
 
     print(f"[完成] 掃描 {total} 支，符合條件共 {len(results)} 支")
+    if reject:
+        sorted_reject = sorted(reject.items(), key=lambda x: -x[1])
+        print("[淘汰原因統計]")
+        for reason, cnt in sorted_reject:
+            print(f"  {reason}: {cnt} 支")
     return pd.DataFrame(results), market_status  # BUG-09：帶回 market_status 供 to_html 使用
 
 
@@ -2169,7 +2189,7 @@ def to_html(df, output_file="index.html", market_status=None):
   {count_info}
   <div class="hint">
     <b>💡 選股邏輯（兩張名單）</b><br>
-    📋 <b>觀察名單</b>：首漲停後整理 1~10 個交易日，收盤在漲停價 ±8% 內，整理均量 &lt; 首波70%，守住漲停日最低價，尚未二波（MA5 為加分項）<br>
+    📋 <b>觀察名單</b>：首漲停後整理 1~15 個交易日，收盤在漲停價 ±8% 內，整理均量 &lt; 首波70%，守住漲停日最低價，尚未二波（MA5 為加分項）<br>
     🔥 <b>二波確認</b>：首漲停後整理 1~6 個交易日，收盤在漲停價 ±5% 內，最後交易日再度漲停（事後確認）<br>
     四層輸出：🔥 二波確認 ／ 🟢 靠近突破 ／ 🔴 卡位觀察 ／ 🟡 整理中<br>
     分級：A+ 量縮嚴格＋多頭排列＋成長產業 ／ A 量縮守位 ／ B 基本通過<br>
