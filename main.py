@@ -288,6 +288,149 @@ def calc_limit_price(prev_close: float) -> float:
     return math.floor(raw / tick) * tick
 
 
+
+# ── 簡易回測模組 ─────────────────────────────────────────────
+def _fmt_pct(value):
+    """將小數格式化成百分比字串。"""
+    if value is None or pd.isna(value):
+        return "-"
+    return f"{value * 100:.1f}%"
+
+
+def _forward_return_and_drawdown(close: pd.Series, signal_pos: int, horizon: int) -> tuple:
+    """計算訊號後 horizon 個交易日的收盤報酬與期間最大回撤。"""
+    if signal_pos + horizon >= len(close):
+        return None, None
+
+    entry_price = float(close.iloc[signal_pos])
+    if entry_price <= 0:
+        return None, None
+
+    future_window = close.iloc[signal_pos + 1: signal_pos + horizon + 1].astype(float)
+    if future_window.empty:
+        return None, None
+
+    end_return = float(close.iloc[signal_pos + horizon]) / entry_price - 1
+    max_drawdown = float(future_window.min()) / entry_price - 1
+    return end_return, max_drawdown
+
+
+def backtest_strategy(df: pd.DataFrame, horizons=(5, 10, 20)) -> dict:
+    """
+    以目前選股核心邏輯做簡易歷史回測。
+    注意：這是單檔股票的歷史訊號統計，不等於未來保證勝率。
+    訊號邏輯：前 3~10 交易日首次漲停，之後出現洗盤型或強勢續攻型。
+    """
+    empty = {
+        "samples": 0,
+        "win_5": None, "avg_5": None,
+        "win_10": None, "avg_10": None, "mdd_10": None,
+        "win_20": None, "avg_20": None,
+    }
+
+    try:
+        if df.empty or len(df) < 90:
+            return empty
+
+        close = df["Close"].squeeze().astype(float)
+        volume = df["Volume"].squeeze().astype(float)
+        open_ = df["Open"].squeeze().astype(float)
+
+        if not isinstance(close, pd.Series) or len(close) < 90:
+            return empty
+
+        signal_positions = []
+        max_horizon = max(horizons)
+        rolling_ma20 = close.rolling(20).mean()
+
+        for cur_i in range(70, len(close) - max_horizon):
+            lo = max(1, cur_i - 10)
+            hi = max(1, cur_i - 3)
+            if lo >= hi:
+                continue
+
+            limit_candidates = []
+            for j in range(lo, hi):
+                try:
+                    limit_price = calc_limit_price(float(close.iloc[j - 1]))
+                    if float(close.iloc[j]) >= limit_price * 0.999:
+                        limit_candidates.append(j)
+                except Exception:
+                    continue
+
+            if not limit_candidates:
+                continue
+
+            last_limit_i = limit_candidates[-1]
+
+            # 近三個月內首次漲停：往前約 63 個交易日檢查
+            start_check = max(1, last_limit_i - 63)
+            prior_limit = False
+            for j in range(start_check, last_limit_i):
+                try:
+                    limit_price = calc_limit_price(float(close.iloc[j - 1]))
+                    if float(close.iloc[j]) >= limit_price * 0.999:
+                        prior_limit = True
+                        break
+                except Exception:
+                    continue
+            if prior_limit:
+                continue
+
+            limit_vol = float(volume.iloc[last_limit_i])
+            limit_low = float(open_.iloc[last_limit_i])
+            curr_price = float(close.iloc[cur_i])
+            curr_vol = float(volume.iloc[cur_i])
+            ma20 = float(rolling_ma20.iloc[cur_i])
+
+            if limit_vol <= 0 or pd.isna(ma20):
+                continue
+
+            shrink = curr_vol < limit_vol * 0.5
+            hold_low = curr_price >= limit_low
+            above_ma = curr_price > ma20
+            prev_price = float(close.iloc[cur_i - 1])
+
+            is_washing = (
+                (shrink and hold_low and above_ma)
+                or (above_ma and curr_vol > limit_vol * 0.8 and curr_price > prev_price)
+            )
+            if not is_washing:
+                continue
+
+            signal_positions.append(cur_i)
+
+        if not signal_positions:
+            return empty
+
+        result = {"samples": len(signal_positions)}
+
+        for h in horizons:
+            returns = []
+            drawdowns = []
+            for pos in signal_positions:
+                r, dd = _forward_return_and_drawdown(close, pos, h)
+                if r is not None:
+                    returns.append(r)
+                if dd is not None:
+                    drawdowns.append(dd)
+
+            if returns:
+                result[f"win_{h}"] = sum(1 for r in returns if r > 0) / len(returns)
+                result[f"avg_{h}"] = sum(returns) / len(returns)
+            else:
+                result[f"win_{h}"] = None
+                result[f"avg_{h}"] = None
+
+            if h == 10:
+                result["mdd_10"] = min(drawdowns) if drawdowns else None
+
+        return {**empty, **result}
+
+    except Exception:
+        return empty
+
+
 # ── 抓取中文名稱對照表 ────────────────────────────────────────
 def fetch_name_map() -> dict:
     name_map = {}
@@ -1334,6 +1477,10 @@ def scan(output_dir="charts", base_url="charts"):
             dates = [d.strftime('%m/%d') for d in limit_days]
             stage_color = '#26a641' if industry_stage in ['復甦初期', '成長中期'] else '#f85149' if industry_stage == '衰退期' else '#ffa500'
 
+            # ── 歷史回測統計（單檔）────────────────────────────
+            bt = backtest_strategy(df)
+            bt_samples = bt.get("samples", 0)
+
             # ── 產生 K 線圖 ────────────────────────────────────
             chart_file = os.path.join(output_dir, f"{code}.html")
             chart_link = f"{base_url}/{code}.html"
@@ -1369,6 +1516,12 @@ def scan(output_dir="charts", base_url="charts"):
                 "進場訊號":    entry_str,
                 "目標價":      target_price,
                 "停損參考":    round(wash_low, 2) if wash_low else "-",
+                "回測樣本":    bt_samples,
+                "5日勝率":     _fmt_pct(bt.get("win_5")),
+                "10日勝率":    _fmt_pct(bt.get("win_10")),
+                "10日均報酬":  _fmt_pct(bt.get("avg_10")),
+                "10日最大回撤": _fmt_pct(bt.get("mdd_10")),
+                "20日勝率":    _fmt_pct(bt.get("win_20")),
             })
 
         except Exception as e:
@@ -1451,7 +1604,8 @@ def to_html(df, output_file="index.html"):
     第二關（洗盤三條件同時成立）：縮量 &lt; 50% ＋ 守起漲點 ＋ 站上月線<br>
     第三關（型態評分）：一字板、量能遞減、均線排列、K 棒型態綜合評分<br>
     第四關（產業位階）：依同產業均線結構加減分，區分復甦、成長、高檔與衰退<br>
-    📊 最終輸出：分為已突破與洗盤中，並列出進場訊號、目標價與停損參考
+    第五關（歷史回測）：統計同檔股票過去類似訊號後 5/10/20 日勝率與報酬<br>
+    📊 最終輸出：分為已突破與洗盤中，並列出進場訊號、目標價、停損參考與回測表現
   </div>
   {table_html}
 </body>
