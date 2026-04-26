@@ -231,12 +231,38 @@ def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, pat
     ma60_vals  = ma(60)
     ma240_vals = ma(240)
 
+    # 計算 KD（9日隨機指標）
+    highs  = [r['high']  for r in records]
+    lows   = [r['low']   for r in records]
+    closes = [r['close'] for r in records]
+    n_kd   = 9
+    k_vals = []
+    d_vals = []
+    prev_k = 50.0
+    prev_d = 50.0
+    for j in range(len(records)):
+        if j < n_kd - 1:
+            k_vals.append(None)
+            d_vals.append(None)
+        else:
+            hh = max(highs[j-n_kd+1:j+1])
+            ll = min(lows[j-n_kd+1:j+1])
+            rsv = ((closes[j] - ll) / (hh - ll) * 100) if hh != ll else 50.0
+            k   = prev_k * 2/3 + rsv * 1/3
+            d   = prev_d * 2/3 + k   * 1/3
+            k_vals.append(round(k, 1))
+            d_vals.append(round(d, 1))
+            prev_k = k
+            prev_d = d
+
     for j, r in enumerate(records):
         r['ma5']  = ma5_vals[j]
         r['ma10'] = ma10_vals[j]
         r['ma20'] = ma20_vals[j]
         r['ma60']  = ma60_vals[j]
         r['ma240'] = ma240_vals[j]
+        r['k']    = k_vals[j]
+        r['d']    = d_vals[j]
 
     data_json  = json.dumps(records, ensure_ascii=False)
     last_close = records[-1]['close'] if records else 0
@@ -368,7 +394,18 @@ def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, pat
   <canvas id="vc"></canvas>
 </div>
 
-<!-- 資訊列（固定在圖下方） -->
+<!-- KD 指標 -->
+<div class="wrap" style="padding:12px 14px;">
+  <div class="wrap-title">KD 指標（9日）</div>
+  <canvas id="kdc"></canvas>
+  <div style="display:flex;gap:18px;font-size:.72rem;color:var(--muted);margin-top:6px;">
+    <span><span class="dot" style="background:#f0c040"></span>K 值</span>
+    <span><span class="dot" style="background:#58a6ff"></span>D 值</span>
+    <span style="color:#8b949e">超買 &gt;80　超賣 &lt;20</span>
+  </div>
+</div>
+
+<!-- 資訊列（緊接在圖下方） -->
 <div id="tip" style="margin-bottom:14px;">
   <span style="color:var(--muted)">← 滑鼠移到 K 線圖查看詳細資訊</span>
 </div>
@@ -406,9 +443,11 @@ function setup(canvas, h) {{
 function draw() {{
   const kcan = document.getElementById('kc');
   const vcan = document.getElementById('vc');
+  const kdcan= document.getElementById('kdc');
   const tip  = document.getElementById('tip');
   const {{ ctx:kc, w, h:kh }} = setup(kcan, 300);
   const {{ ctx:vc, h:vh }}    = setup(vcan, 70);
+  const {{ ctx:kdc,h:kdh }}   = setup(kdcan, 80);
 
   const n=DATA.length, PL=10, PR=52, PT=16, PB=26;
   const cw=w-PL-PR, ch=kh-PT-PB;
@@ -484,14 +523,76 @@ function draw() {{
 
 
 
-  // 資訊列（固定在圖下方，不遮擋 K 線）
+  // KD 指標繪製
+  const kdMU='#8b949e', kdGR='#21262d';
+  // 超買超賣參考線
+  [20, 50, 80].forEach(lv=>{{
+    const y=kdh-(lv/100)*(kdh-4)-2;
+    kdc.strokeStyle= lv===50 ? kdGR : (lv===80?'#f8514944':'#26a64144');
+    kdc.lineWidth=1; kdc.setLineDash([3,3]);
+    kdc.beginPath(); kdc.moveTo(PL,y); kdc.lineTo(w-PR,y); kdc.stroke();
+    kdc.setLineDash([]);
+    kdc.fillStyle=kdMU; kdc.font='9px SF Mono,monospace'; kdc.textAlign='left';
+    kdc.fillText(lv, w-PR+4, y+3);
+  }});
+  // K 線
+  kdc.strokeStyle='#f0c040'; kdc.lineWidth=1.2; kdc.beginPath();
+  let kdStarted=false;
+  DATA.forEach((d,i)=>{{
+    if(d.k===null||d.k===undefined){{kdStarted=false;return;}}
+    const x=PL+i*gap+gap/2, y=kdh-(d.k/100)*(kdh-4)-2;
+    if(!kdStarted){{kdc.moveTo(x,y);kdStarted=true;}}else kdc.lineTo(x,y);
+  }}); kdc.stroke();
+  // D 線
+  kdc.strokeStyle='#58a6ff'; kdc.lineWidth=1.2; kdc.beginPath();
+  kdStarted=false;
+  DATA.forEach((d,i)=>{{
+    if(d.d===null||d.d===undefined){{kdStarted=false;return;}}
+    const x=PL+i*gap+gap/2, y=kdh-(d.d/100)*(kdh-4)-2;
+    if(!kdStarted){{kdc.moveTo(x,y);kdStarted=true;}}else kdc.lineTo(x,y);
+  }}); kdc.stroke();
+
+  // KD 黃金交叉標記
+  for(let i=1;i<DATA.length;i++){{
+    const prev=DATA[i-1], cur=DATA[i];
+    if(prev.k===null||cur.k===null||prev.d===null||cur.d===null) continue;
+    // 黃金交叉：K 從下穿上 D
+    if(prev.k<=prev.d && cur.k>cur.d){{
+      const x=PL+i*gap+gap/2;
+      const y=kdh-(cur.k/100)*(kdh-4)-2;
+      kdc.fillStyle='#ffd700';
+      kdc.font='bold 10px sans-serif';
+      kdc.textAlign='center';
+      kdc.fillText('★',x,y-6);  // ★
+    }}
+    // 死亡交叉：K 從上穿下 D
+    if(prev.k>=prev.d && cur.k<cur.d){{
+      const x=PL+i*gap+gap/2;
+      const y=kdh-(cur.k/100)*(kdh-4)-2;
+      kdc.fillStyle='#f85149';
+      kdc.font='bold 10px sans-serif';
+      kdc.textAlign='center';
+      kdc.fillText('★',x,y+12);  // ★
+    }}
+  }}
+
+  // 游標直線 + 資訊列（固定在圖下方，不遮擋 K 線）
   kcan.onmousemove=e=>{{
     const r=kcan.getBoundingClientRect();
-    const i=Math.round((e.clientX-r.left-PL)/gap-0.5);
+    const mx=e.clientX-r.left;
+    const i=Math.round((mx-PL)/gap-0.5);
     if(i<0||i>=n) return;
     const d=DATA[i];
     const col=d.limit?'#ffa500':(d.close>=d.open?'#26a641':'#f85149');
     const chg=((d.close-d.open)/d.open*100).toFixed(2);
+
+    // 游標直線（重繪 K 線後疊加）
+    draw();
+    const cx=PL+i*gap+gap/2;
+    kc.strokeStyle='rgba(255,255,255,0.25)'; kc.lineWidth=1; kc.setLineDash([4,3]);
+    kc.beginPath(); kc.moveTo(cx,PT); kc.lineTo(cx,kh-PB); kc.stroke();
+    kc.setLineDash([]);
+
     tip.innerHTML=
       `<span style="color:var(--muted)">${{d.date}}</span>` +
       ` 開<b>${{d.open}}</b>` +
@@ -504,9 +605,12 @@ function draw() {{
       (d.ma20  ? ` <span style="color:#58a6ff">MA20 <b>${{d.ma20}}</b></span>` : '') +
       (d.ma60  ? ` <span style="color:#bc8cff">MA60 <b>${{d.ma60}}</b></span>` : '') +
       (d.ma240 ? ` <span style="color:#ff8c42">MA240 <b>${{d.ma240}}</b></span>` : '') +
+      (d.k !== null ? ` <span style="color:#f0c040">K<b>${{d.k}}</b></span>` : '') +
+      (d.d !== null ? ` <span style="color:#58a6ff">D<b>${{d.d}}</b></span>` : '') +
       (d.limit ? ` <span style="color:#ffa500;font-weight:700">🔥漲停</span>` : '');
   }};
   kcan.onmouseleave=()=>{{
+    draw();
     tip.innerHTML='<span style="color:var(--muted)">← 滑鼠移到 K 線圖查看詳細資訊</span>';
   }};
 }}
@@ -653,11 +757,23 @@ def scan(output_dir="charts", base_url="charts"):
             curr_vol   = float(volume.iloc[-1])
             ma20       = float(close.rolling(20).mean().iloc[-1])
 
-            # ── 第二關：洗盤三條件 ─────────────────────────────
+            # ── 第二關：洗盤條件 ──────────────────────────────
             shrink     = curr_vol < limit_vol * 0.5
             hold_low   = curr_price >= limit_low
             above_ma   = curr_price > ma20
-            is_washing = shrink and hold_low and above_ma
+
+            is_washing_type = None
+            if shrink and hold_low and above_ma:
+                is_washing      = True
+                is_washing_type = "洗盤型"
+            elif above_ma and curr_vol > limit_vol * 0.8 and curr_price > float(close.iloc[-2]):
+                is_washing      = True
+                is_washing_type = "強勢續攻型"
+            else:
+                is_washing = False
+
+            if not is_washing:
+                continue  # 不符合洗盤或強勢續攻，跳過
 
             vol_ratio_pct = f"{round((curr_vol / limit_vol) * 100)}%"
             days_since    = len([d for d in trading_days if d > last_limit_date])
@@ -667,9 +783,10 @@ def scan(output_dir="charts", base_url="charts"):
             name   = name_map.get(code, "")
 
             wash_info = {
-                "vol_ratio":  vol_ratio_pct,
-                "above_ma20": above_ma,
-                "hold_low":   hold_low,
+                "vol_ratio":    vol_ratio_pct,
+                "above_ma20":   above_ma,
+                "hold_low":     hold_low,
+                "washing_type": is_washing_type,
             }
 
             # ── 型態分析 ───────────────────────────────────────
@@ -743,6 +860,22 @@ def scan(output_dir="charts", base_url="charts"):
             except Exception:
                 pass
 
+            # D0. MA60 季線斜率（向上加分）
+            try:
+                ma60_series = close.rolling(60).mean()
+                if len(ma60_series.dropna()) >= 10:
+                    ma60_slope = float(ma60_series.iloc[-1]) - float(ma60_series.iloc[-10])
+                    if ma60_slope > 0:
+                        pattern['score'] += 15
+                        extra_notes.append(f"✅ 季線（MA60）向上走勢，趨勢背景良好")
+                    elif ma60_slope > -1:
+                        extra_notes.append("⚠️ 季線（MA60）走平，趨勢中性")
+                    else:
+                        pattern['score'] -= 10
+                        extra_notes.append("❌ 季線（MA60）向下，趨勢偏弱")
+            except Exception:
+                pass
+
             # D. 站上年線（MA240）
             try:
                 ma240 = close.rolling(240).mean()
@@ -783,20 +916,42 @@ def scan(output_dir="charts", base_url="charts"):
             ps = pattern['score']
             pattern['grade'] = "🔥🔥 極強" if ps >= 140 else "🔥 強" if ps >= 100 else "⚠️ 普通" if ps >= 60 else "❌ 弱"
 
-            # ── 修改4：是否突破洗盤區間 ────────────────────────
+            # ── 修改4：是否突破洗盤區間 + 突破強度 + 停損參考價 ──
             try:
                 limit_idx  = list(close.index).index(last_limit_date)
                 wash_highs = df['High'].iloc[limit_idx+1:-1]
-                if len(wash_highs) > 0:
+                wash_lows  = df['Low'].iloc[limit_idx+1:-1]
+
+                # 修改2：至少2天洗盤才算有效
+                if len(wash_highs) >= 2:
                     wash_high   = float(wash_highs.max())
+                    wash_low    = float(wash_lows.min())  # 修改4：停損參考價
                     today_close = float(close.iloc[-1])
                     is_breakout = today_close > wash_high
+                    if is_breakout:
+                        breakout_strength  = round(today_close / wash_high, 3)
+                        breakout_vol_ratio = round(curr_vol / limit_vol, 2)
+                        if breakout_vol_ratio >= 0.5:
+                            breakout_str = f"🔥 突破 {breakout_strength:.2f}x（有量）"
+                        else:
+                            breakout_str = f"⚠️ 突破 {breakout_strength:.2f}x（量縮試盤）"
+                    else:
+                        breakout_strength  = 0
+                        breakout_vol_ratio = 0
+                        breakout_str       = "-"
                 else:
-                    is_breakout = False
+                    is_breakout        = False
+                    breakout_strength  = 0
+                    breakout_vol_ratio = 0
+                    breakout_str       = "-"
+                    wash_low           = float(close.loc[last_limit_date])
             except Exception:
-                is_breakout = False
+                is_breakout        = False
+                breakout_strength  = 0
+                breakout_vol_ratio = 0
+                breakout_str       = "-"
+                wash_low           = 0
 
-            breakout_str = "🔥 突破" if is_breakout else "-"
 
             # ── 產生 K 線圖 ────────────────────────────────────
             chart_file      = os.path.join(output_dir, f"{code}.html")
@@ -825,6 +980,8 @@ def scan(output_dir="charts", base_url="charts"):
                 "收盤價":    round(curr_price, 2),
                 "漲停軌跡":   " / ".join(dates),
                 "突破洗盤":    breakout_str,
+                "進場訊號":    "✅ 進場" if (is_breakout and breakout_vol_ratio >= 0.5 and pattern['score'] >= 100) else "-",
+                "停損參考":    round(wash_low, 2) if wash_low else "-",
             })
 
         except Exception as e:
@@ -840,18 +997,27 @@ def to_html(df, output_file="index.html"):
     t = (datetime.utcnow() + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
 
     if not df.empty:
-        # 按型態評分高到低排序，同分再按洗盤量比小優先，全部輸出
-        all_sorted = (
-            df.sort_values(['_score', '_vol_num'], ascending=[False, True])
-            .drop(columns=['_score', '_vol_num'])
+        # 拆成兩區塊：已突破 / 洗盤中
+        df_break = df[df['突破洗盤'] != '-'].sort_values(['_score', '_vol_num'], ascending=[False, True]).drop(columns=['_score', '_vol_num'])
+        df_watch = df[df['突破洗盤'] == '-'].sort_values(['_score', '_vol_num'], ascending=[False, True]).drop(columns=['_score', '_vol_num'])
+
+        break_html = df_break.to_html(index=False, escape=False) if not df_break.empty else "<p style='color:var(--muted);padding:12px'>目前無突破標的</p>"
+        watch_html = df_watch.to_html(index=False, escape=False) if not df_watch.empty else "<p style='color:var(--muted);padding:12px'>目前無洗盤中標的</p>"
+
+        table_html = (
+            "<h2 style='color:#ffa500;font-size:1.1rem;margin:20px 0 10px'>"
+            "🔥 已突破洗盤區間（可考慮進場）</h2>" +
+            break_html +
+            "<h2 style='color:#58a6ff;font-size:1.1rem;margin:28px 0 10px'>"
+            "📊 洗盤中（持續觀察）</h2>" +
+            watch_html
         )
-        fire_count = len(df)
-        table_html = all_sorted.to_html(index=False, escape=False)
         count_info = (
             f"<p class='count'>"
-            f"本次掃描「準備起飛」共 <strong style='color:#d93025'>{fire_count} 支</strong>，"
-            f"依型態評分由高到低排列"
-            f"&nbsp;｜&nbsp; 點擊代碼查看 K 線圖 + 籌碼 + 型態分析</p>"
+            f"本次揃描共 <strong style='color:#d93025'>{len(df)}</strong> 支符合條件，"
+            f"其中 <strong style='color:#ffa500'>{len(df_break)} 支</strong> 已突破，"
+            f"<strong style='color:#58a6ff'>{len(df_watch)} 支</strong> 洗盤中"
+            f"&nbsp;｜&nbsp; 點擊代碼查看 K 線圖</p>"
         )
     else:
         table_html = "<div class='empty'>⚠️ 目前無符合條件標的</div>"
