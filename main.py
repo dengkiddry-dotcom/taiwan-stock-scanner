@@ -1425,6 +1425,11 @@ def scan(output_dir="charts", base_url="charts"):
 
     for i, s in enumerate(stocks):
         try:
+            # 預設值，避免 referenced before assignment
+            industry       = "未分類"
+            industry_stage = "未知"
+            leader_adj     = 0
+
             if i % 20 == 0 and i > 0:
                 print(f"[進度] {i}/{total}，暫停 3 秒...")
                 time.sleep(3)
@@ -1720,6 +1725,11 @@ def scan(output_dir="charts", base_url="charts"):
             limit_days = pd.DatetimeIndex([first_limit_date, today_idx])
 
             industry, industry_stage = resolve_industry_stage(code, df, industry_lookup, industry_stage_cache)
+            if not industry:
+                industry = "未分類"
+            if not industry_stage:
+                industry_stage = "未知"
+            leader_adj = leader_score_adj.get(industry, 0)
 
             vol_expand      = today_vol >= limit_vol * 0.5
             is_washing      = True
@@ -1913,9 +1923,12 @@ def scan(output_dir="charts", base_url="charts"):
 
             pattern['notes'] = extra_notes + pattern['notes']
 
-            stage_bonus = {"復甦初期": 20, "成長中期": 10, "盤整過渡": 0, "高檔過熱": -10, "高檔成熟": -10, "衰退期": -10, "盤整過渡": 0, "未知": 0}.get(industry_stage, 0)
+            stage_bonus = {"復甦初期": 20, "成長中期": 10, "盤整過渡": 0, "高檔過熱": -10, "高檔成熟": -10, "衰退期": -10, "未知": 0}.get(industry_stage, 0)
+            # 產業未分類扣分：鼓勵系統優先推薦有明確族群的股票
+            if industry in ("未分類", "其他"):
+                stage_bonus -= 5
             # FIX-20：龍頭股加減分
-            leader_adj = leader_score_adj.get(industry, 0)
+            # leader_adj 已在 resolve_industry_stage 後取得，直接使用
             total_stage_bonus = stage_bonus + leader_adj
             if total_stage_bonus != 0:
                 pattern['score'] += total_stage_bonus
@@ -2115,7 +2128,40 @@ def scan(output_dir="charts", base_url="charts"):
         print("[淘汰原因統計]")
         for reason, cnt in sorted_reject:
             print(f"  {reason}: {cnt} 支")
-    return pd.DataFrame(results), market_status  # BUG-09：帶回 market_status 供 to_html 使用
+
+    # ── 產業分散限制：同產業最多 2 檔 ──────────────────────────
+    sector_limit  = {}
+    results_final = []
+    # 先按評分排序，確保同產業保留最強的
+    results_sorted = sorted(results, key=lambda x: x.get("_score", 0), reverse=True)
+    for r in results_sorted:
+        ind = r.get("產業", "其他")
+        # 二波確認不受產業限制（最高優先）
+        if r.get("操作", "") == "🔥 二波確認":
+            results_final.append(r)
+            continue
+        if sector_limit.get(ind, 0) >= 2:
+            continue   # 同產業已有2檔，跳過
+        results_final.append(r)
+        sector_limit[ind] = sector_limit.get(ind, 0) + 1
+
+    print(f"[分散] 產業分散後剩 {len(results_final)} 支")
+
+    # ── 精選清單：可掛單前10 + 二波確認全留 ─────────────────────
+    picks_fire  = [r for r in results_final if r.get("操作","") == "🔥 二波確認"]
+    picks_buy   = [r for r in results_final if r.get("操作","") == "✅ 可掛單"]
+    picks_watch = [r for r in results_final if r.get("操作","") == "👀 觀察"]
+    picks_rej   = [r for r in results_final if r.get("操作","") == "❌ 剔除"]
+
+    # 可掛單取評分最高10檔
+    picks_buy   = sorted(picks_buy,   key=lambda x: x.get("_score", 0), reverse=True)[:10]
+    picks_watch = sorted(picks_watch, key=lambda x: x.get("_score", 0), reverse=True)
+
+    results_out = picks_fire + picks_buy + picks_watch + picks_rej
+
+    print(f"[精選] 🔥二波確認 {len(picks_fire)} 支 ｜ ✅可掛單(前10) {len(picks_buy)} 支 ｜ 👀觀察 {len(picks_watch)} 支 ｜ ❌剔除 {len(picks_rej)} 支")
+
+    return pd.DataFrame(results_out), market_status  # BUG-09：帶回 market_status 供 to_html 使用
 
 
 # ── 輸出主報表 HTML ──────────────────────────────────────────
@@ -2124,6 +2170,10 @@ def to_html(df, output_file="index.html", market_status=None):
     if market_status is None:
         market_status = {}
     t = (datetime.utcnow() + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
+
+    # 空 DataFrame 保護：避免後續欄位存取出錯
+    if df is None or df.empty:
+        df = pd.DataFrame()
 
     if not df.empty:
         sort_cols = ['_tier_key', '_score', '_vol_num']
