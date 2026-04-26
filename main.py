@@ -35,26 +35,18 @@ def fetch_name_map() -> dict:
 # ── 爬三大法人資料 ───────────────────────────────────────────
 def fetch_institutional(code: str, is_tw: bool, days: int = 10) -> list:
     """
-    回傳近 N 天的三大法人資料
-    上市用證交所，上櫃用櫃買中心
+    使用證交所/櫃買 OpenAPI 抓三大法人資料（公開無需登入）
+    上市：openapi.twse.com.tw
+    上櫃：openapi.tpex.org.tw
     """
-    results = []
-    today   = datetime.now()
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept": "application/json, text/javascript, */*",
-        "Referer": "https://www.twse.com.tw/",
-    }
-
     def safe_int(s):
         try:
             return int(str(s).replace(",", "").replace("+", "").strip())
         except Exception:
             return 0
+
+    results = []
+    today   = datetime.now()
 
     # 收集近 days 個工作日
     trading_dates = []
@@ -66,52 +58,44 @@ def fetch_institutional(code: str, is_tw: bool, days: int = 10) -> list:
             break
 
     for d in reversed(trading_dates):
-        date_str   = d.strftime("%Y%m%d")
-        date_slash = d.strftime("%Y/%m/%d")
+        date_str = d.strftime("%Y%m%d")
         try:
             if is_tw:
-                url = (
-                    f"https://www.twse.com.tw/rwd/zh/fund/T86"
-                    f"?response=json&date={date_str}&selectType=ALL"
-                )
-                r = requests.get(url, timeout=10, headers=headers)
+                # 上市：證交所 OpenAPI 三大法人
+                url = f"https://openapi.twse.com.tw/v1/fund/TWT38U?date={date_str}"
+                r   = requests.get(url, timeout=10)
                 if r.status_code != 200:
                     continue
                 data = r.json()
-                if data.get("stat") != "OK":
-                    continue
-                for row in data.get("data", []):
-                    if str(row[0]).strip() == code:
+                for row in data:
+                    if str(row.get("股票代號", "")).strip() == code:
                         results.append({
                             "date":    d.strftime("%m/%d"),
-                            "foreign": safe_int(row[4]),
-                            "trust":   safe_int(row[7]),
-                            "dealer":  safe_int(row[10]),
+                            "foreign": safe_int(row.get("外陸資買賣超股數(不含外資自營商)", 0)),
+                            "trust":   safe_int(row.get("投信買賣超股數", 0)),
+                            "dealer":  safe_int(row.get("自營商買賣超股數", 0)),
                         })
                         break
             else:
-                url = (
-                    f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/"
-                    f"3itrade_hedge.php?l=zh-tw&se=EW&t=D"
-                    f"&d={date_slash}&s=0,asc&o=json"
-                )
-                r = requests.get(url, timeout=10, headers=headers)
+                # 上櫃：櫃買 OpenAPI 三大法人
+                url = f"https://www.tpex.org.tw/openapi/v1/tpex_3insti_diff_vol_ratio?date={date_str}"
+                r   = requests.get(url, timeout=10)
                 if r.status_code != 200:
                     continue
                 data = r.json()
-                for row in data.get("aaData", []):
-                    if str(row[0]).strip() == code:
+                for row in data:
+                    if str(row.get("SecuritiesCompanyCode", "")).strip() == code:
                         results.append({
                             "date":    d.strftime("%m/%d"),
-                            "foreign": safe_int(row[3]),
-                            "trust":   safe_int(row[6]),
-                            "dealer":  safe_int(row[9]),
+                            "foreign": safe_int(row.get("ForeignInvestmentNetBuy", 0)),
+                            "trust":   safe_int(row.get("InvestmentTrustNetBuy", 0)),
+                            "dealer":  safe_int(row.get("DealerNetBuy", 0)),
                         })
                         break
         except Exception as e:
             print(f"  [法人] {d.strftime('%m/%d')} 錯誤：{e}")
             continue
-        time.sleep(0.4)
+        time.sleep(0.3)
 
     return results
 
@@ -235,6 +219,9 @@ def analyze_pattern(df: pd.DataFrame, limit_days: list) -> dict:
         notes.append("⚠️ 部分均線多頭（價 > MA10 > MA20）")
     else:
         notes.append("❌ 均線排列不佳，趨勢偏弱")
+
+    # ── 洗盤加分（由外部傳入）─────────────────────────────
+    # 由 scan() 呼叫後再加分，這裡先佔位
 
     # ── 評分等級 ────────────────────────────────────────────
     if score >= 70:
@@ -617,7 +604,7 @@ def gemini_analysis(code: str, name: str, pattern: dict, wash_info: dict,
 
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-2.0-flash-lite:generateContent?key={GEMINI_API_KEY}"
+        f"gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
     )
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
@@ -754,9 +741,6 @@ def scan(output_dir="charts", base_url="charts"):
             above_ma   = curr_price > ma20
             is_washing = shrink and hold_low and above_ma
 
-            if not is_washing:
-                continue  # 只保留準備起飛的標的
-
             vol_ratio_pct = f"{round((curr_vol / limit_vol) * 100)}%"
             days_since    = (today - last_limit_date.to_pydatetime()).days
 
@@ -774,13 +758,36 @@ def scan(output_dir="charts", base_url="charts"):
             # ── 型態分析 ───────────────────────────────────────
             pattern = analyze_pattern(df, list(limit_days))
 
+            # ── 洗盤加分（加入型態評分）───────────────────────
+            wash_score_notes = []
+            if shrink:
+                pattern['score'] += 20
+                wash_score_notes.append("✅ 縮量洗盤（今日量 < 漲停量 50%），主力鎖碼")
+            else:
+                wash_score_notes.append(f"⚠️ 量能未縮（今日量 {vol_ratio_pct}），主力態度未明")
+            if hold_low:
+                pattern['score'] += 10
+                wash_score_notes.append("✅ 守住漲停日起漲點，籌碼穩定")
+            else:
+                wash_score_notes.append("❌ 跌破起漲點，籌碼鬆動")
+            if above_ma:
+                pattern['score'] += 5
+                wash_score_notes.append("✅ 站上月線，趨勢向上")
+            else:
+                wash_score_notes.append("❌ 跌破月線，趨勢偏弱")
+            pattern['notes'] = wash_score_notes + pattern['notes']
+
+            # 重新計算評分等級
+            ps = pattern['score']
+            pattern['grade'] = "🔥🔥 極強" if ps >= 85 else "🔥 強" if ps >= 60 else "⚠️ 普通" if ps >= 35 else "❌ 弱" 
+
             # ── 爬三大法人 ─────────────────────────────────────
             print(f"  [{code}] 抓三大法人資料...")
             inst_data = fetch_institutional(code, is_tw, days=10)
 
             # ── Gemini AI 分析 ─────────────────────────────────
             print(f"  [{code}] 呼叫 Gemini 分析...")
-            time.sleep(10)  # 避免 429 限流
+            time.sleep(60)  # 避免 429 限流（每分鐘限制）
             ai_analysis = gemini_analysis(
                 code, name, pattern, wash_info, inst_data, days_since
             )
