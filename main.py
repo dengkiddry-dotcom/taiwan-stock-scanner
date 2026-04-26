@@ -122,6 +122,19 @@ def get_industry_stage(industry_dfs: list) -> str:
         return "衰退期"
 
 
+# ── 產業位階 fallback ────────────────────────────────────────
+def resolve_industry_stage(code: str, df: pd.DataFrame, industry_stage_cache: dict, market_stage: str) -> tuple:
+    """回傳產業與位階；若股票未在 industry_map，改用全市場位階，避免顯示未知。"""
+    industry = industry_map.get(code, "其他")
+    stage = industry_stage_cache.get(industry)
+
+    if not stage or stage == "未知":
+        # 未分類股票先用全市場位階；若仍未知，再用個股本身均線結構判斷
+        stage = market_stage if market_stage and market_stage != "未知" else get_industry_stage([df])
+
+    return industry, stage
+
+
 # ── 台股漲停價計算（含跳動價位）────────────────────────────────
 def calc_limit_price(prev_close: float) -> float:
     """依台股跳動價位規則計算漲停價"""
@@ -847,11 +860,14 @@ def scan(output_dir="charts", base_url="charts"):
             continue
     print(f"[產業] 完成，涵蓋 {len(industry_data)} 個產業")
 
-    # 預先計算各產業位階
+    # 預先計算各產業位階；另建立「其他」fallback，避免未分類股票顯示未知
     industry_stage_cache = {
         ind: get_industry_stage(dfs)
         for ind, dfs in industry_data.items()
     }
+    market_stage = get_industry_stage(list(price_cache.values()))
+    industry_stage_cache["其他"] = market_stage
+    print("[產業] 位階快取：" + ", ".join(f"{k}={v}" for k, v in sorted(industry_stage_cache.items())))
 
     print(f"[掃描] 共 {total} 支，條件：前 3~10 交易日首次漲停 + 縮量洗盤 + 型態分析")
 
@@ -965,9 +981,8 @@ def scan(output_dir="charts", base_url="charts"):
             market = "上市" if s.endswith(".TW") else "上櫃"
             name   = name_map.get(code, "")
 
-            # 修改1：產業分類與位階
-            industry       = industry_map.get(code, '其他')
-            industry_stage = industry_stage_cache.get(industry, '未知')
+            # 產業分類與位階；未分類股票使用市場位階或個股均線 fallback，避免整欄未知
+            industry, industry_stage = resolve_industry_stage(code, df, industry_stage_cache, market_stage)
 
             wash_info = {
                 "vol_ratio":    vol_ratio_pct,
