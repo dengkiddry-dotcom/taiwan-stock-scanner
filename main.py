@@ -196,11 +196,38 @@ def get_industry_stage(industry_dfs: list, industry_name: str = "") -> str:
 
 
 # ── 官方產業分類抓取 ─────────────────────────────────────────
+# 數字代碼對照表（TWSE/TPEX 官方產業代碼）
+_CODE_MAP = {
+    "01": "水泥", "02": "食品", "03": "塑膠", "04": "紡織",
+    "05": "電機", "06": "電器電纜", "07": "化工", "08": "玻璃",
+    "09": "造紙", "10": "鋼鐵", "11": "橡膠", "12": "汽車",
+    "13": "電子零組件", "14": "建設", "15": "航運", "16": "觀光",
+    "17": "金融", "18": "貿易百貨", "19": "油電燃氣", "20": "其他",
+    "21": "半導體", "22": "電腦週邊", "23": "光電", "24": "通信網路",
+    "25": "電子通路", "26": "資訊服務", "27": "其他電子", "28": "文化創意",
+    "29": "農業科技", "30": "電子商務", "31": "觀光餐旅", "32": "運動休閒",
+    "33": "居家生活", "34": "綠能環保", "35": "數位雲端", "36": "生技",
+    "37": "金融", "38": "管理顧問", "80": "管理股票",
+    # 上櫃代碼
+    "11B": "半導體", "12B": "電腦週邊", "13B": "光電",
+    "14B": "通信網路", "15B": "電子通路", "16B": "資訊服務",
+    "17B": "其他電子", "20B": "生技", "21B": "文化創意",
+    "22B": "觀光餐旅", "23B": "居家生活", "24B": "航運",
+    "25B": "油電燃氣", "26B": "金融", "29B": "其他",
+}
+
+
 def normalize_industry_name(raw: str) -> str:
     if not raw:
-        return ""
+        return "其他"
 
     name = str(raw).strip()
+
+    # 純數字代碼或字母代碼 → 直接查表
+    if name in _CODE_MAP:
+        return _CODE_MAP[name]
+
+    # 去除常見後綴再比對
     name = name.replace("業", "").replace("類", "").replace("股票", "")
 
     mapping_keywords = [
@@ -219,6 +246,7 @@ def normalize_industry_name(raw: str) -> str:
         ("油電燃氣", "油電燃氣"),
         ("化學", "化工"),
         ("生技醫療", "生技"),
+        ("生技", "生技"),
         ("電機機械", "電機"),
         ("建材營造", "建設"),
         ("食品", "食品"),
@@ -227,6 +255,9 @@ def normalize_industry_name(raw: str) -> str:
         ("汽車", "汽車"),
         ("觀光餐旅", "觀光"),
         ("貿易百貨", "貿易百貨"),
+        ("數位雲端", "數位雲端"),
+        ("綠能環保", "綠能"),
+        ("文化創意", "文創"),
     ]
     for key, value in mapping_keywords:
         if key in name:
@@ -708,7 +739,7 @@ def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, pat
   :root {{
     --bg:#0d1117; --panel:#161b22; --border:#30363d;
     --text:#e6edf3; --muted:#8b949e;
-    --up:#26a641; --down:#f85149; --limit:#ffa500; --accent:#58a6ff;
+    --up:#f85149; --down:#26a641; --limit:#ffa500; --accent:#58a6ff;
   }}
   *{{ box-sizing:border-box; margin:0; padding:0; }}
   body{{ background:var(--bg); color:var(--text);
@@ -814,8 +845,8 @@ def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, pat
   <canvas id="kc"></canvas>
 </div>
 <div class="legend">
-  <span><span class="dot" style="background:var(--up)"></span>上漲</span>
-  <span><span class="dot" style="background:var(--down)"></span>下跌</span>
+  <span><span class="dot" style="background:var(--up)"></span>上漲（紅）</span>
+  <span><span class="dot" style="background:var(--down)"></span>下跌（綠）</span>
   <span><span class="dot" style="background:var(--limit)"></span>漲停</span>
   <span><span class="dot" style="background:#f0c040"></span>MA5</span>
   <span><span class="dot" style="background:#e06080"></span>MA10</span>
@@ -930,7 +961,7 @@ function draw() {{
   const gap = cw / sn;
   const bw  = Math.max(2, Math.min(14, gap - 2));
 
-  const UP = '#26a641', DN = '#f85149', LM = '#ffa500', MU = '#8b949e', GR = '#21262d';
+  const UP = '#f85149', DN = '#26a641', LM = '#ffa500', MU = '#8b949e', GR = '#21262d';  // 紅漲綠跌（台灣習慣）
 
   // ── K 線圖 ──────────────────────────────────────────────────
   kc.clearRect(0, 0, w, kh);
@@ -1096,7 +1127,7 @@ function draw() {{
     const i  = Math.round((mx - PL) / gap - 0.5);
     if (i < 0 || i >= sn) return;
     const d   = slice[i];
-    const col = d.limit ? '#ffa500' : (d.close >= d.open ? '#26a641' : '#f85149');
+    const col = d.limit ? '#ffa500' : (d.close >= d.open ? '#f85149' : '#26a641');  // 紅漲綠跌
     const chg = ((d.close - d.open) / d.open * 100).toFixed(2);
 
     // 同步游標線（重繪後疊加）
@@ -2210,6 +2241,66 @@ def to_html(df, output_file="index.html", market_status=None):
         table_html = "<div class='empty'>⚠️ 目前無符合條件標的</div>"
         count_info = ""
 
+    # ── 操作卡片（今日可掛單清單）──────────────────────────────
+    def _make_op_cards(df_in):
+        """為 🔥 二波確認 + ✅ 可掛單 產生操作卡片 HTML"""
+        if df_in is None or df_in.empty:
+            return "<p style='color:var(--muted);padding:12px'>今日無可操作標的</p>"
+
+        cards = []
+        for _, row in df_in.iterrows():
+            op       = str(row.get("操作", ""))
+            name_raw = str(row.get("名稱", ""))
+            code_raw = str(row.get("代碼", ""))
+            entry    = row.get("進場參考價", "-")
+            sl_a     = row.get("積極停損", "-")
+            sl_d     = row.get("防守停損", "-")
+            target   = row.get("2R目標價", "-")
+            risk     = row.get("單筆風險", "-")
+            note     = str(row.get("執行備註", "")).replace("⚠️ 量大未突破，注意出貨 ", "⚠️量偏大 ").replace("📈 放量突破，觀察是否續強 ", "📈放量突破 ")
+            industry = str(row.get("產業", ""))
+            score_html = str(row.get("型態評分", ""))
+            days     = row.get("整理(交易日)", "-")
+            limit_q  = str(row.get("首漲停板", ""))
+
+            op_color = "#d93025" if "二波" in op else "#26a641"
+            op_icon  = "🔥" if "二波" in op else "✅"
+
+            card = f"""<div style="background:var(--panel);border:1px solid var(--border);border-left:4px solid {op_color};
+border-radius:8px;padding:16px 20px;margin-bottom:12px;">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;">
+    <span style="font-size:1.1rem;font-weight:700;color:{op_color}">{op_icon} {op}</span>
+    <span style="font-size:1rem;font-weight:700;color:var(--accent)">{code_raw}</span>
+    <span style="font-size:.9rem;">{name_raw}</span>
+    <span style="font-size:.75rem;background:#1c2128;padding:2px 8px;border-radius:4px;color:var(--muted)">{industry}</span>
+    <span style="font-size:.75rem;color:var(--muted)">整理{days}交易日｜{limit_q}</span>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px;">
+    <div style="background:#0d1117;border-radius:6px;padding:8px 12px;">
+      <div style="font-size:.65rem;color:var(--muted);margin-bottom:4px;">📌 掛單價</div>
+      <div style="font-size:1rem;font-weight:700;color:#58a6ff">{entry}</div>
+    </div>
+    <div style="background:#0d1117;border-radius:6px;padding:8px 12px;">
+      <div style="font-size:.65rem;color:var(--muted);margin-bottom:4px;">🛡 積極停損</div>
+      <div style="font-size:1rem;font-weight:700;color:#f85149">{sl_a}</div>
+    </div>
+    <div style="background:#0d1117;border-radius:6px;padding:8px 12px;">
+      <div style="font-size:.65rem;color:var(--muted);margin-bottom:4px;">🔒 防守停損</div>
+      <div style="font-size:1rem;font-weight:700;color:#f85149aa">{sl_d}</div>
+    </div>
+    <div style="background:#0d1117;border-radius:6px;padding:8px 12px;">
+      <div style="font-size:.65rem;color:var(--muted);margin-bottom:4px;">🎯 2R目標</div>
+      <div style="font-size:1rem;font-weight:700;color:#26a641">{target}</div>
+    </div>
+  </div>
+  <div style="display:flex;gap:16px;font-size:.8rem;flex-wrap:wrap;align-items:center;">
+    <span>單筆風險：<b style="color:#ffa500">{risk}</b></span>
+    <span style="color:var(--muted)">{note}</span>
+  </div>
+</div>"""
+            cards.append(card)
+        return "\n".join(cards)
+
     # 大盤狀態 HTML
     def _mkt_badge(ok, label, close_val, ma20_val):
         if ok is None:
@@ -2228,6 +2319,16 @@ def to_html(df, output_file="index.html", market_status=None):
     market_warn = 1 if _twii_ok is False else 0
     mkt_warn_color = "#26a641" if market_warn == 0 else "#ffa500"
     mkt_warn_text  = "✅ 大盤多頭，正常操作" if market_warn == 0 else "⚠️ 加權指數跌破MA20，降低部位"
+
+    # 生成操作卡片（只含 🔥 + ✅）
+    if not df.empty:
+        df_op = df[df['操作'].isin(['🔥 二波確認', '✅ 可掛單'])].copy() if '操作' in df.columns else pd.DataFrame()
+        # 移除 HTML 超連結，取純代碼
+        if not df_op.empty and '_tier_key' in df_op.columns:
+            df_op = df_op.sort_values(['_tier_key', '_score'], ascending=[True, False])
+        op_cards_html = _make_op_cards(df_op)
+    else:
+        op_cards_html = "<p style='color:var(--muted)'>今日無可操作標的</p>"
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-TW">
@@ -2258,16 +2359,27 @@ def to_html(df, output_file="index.html", market_status=None):
     tr:last-child td{{border-bottom:none;}}
     tr:hover td{{background:#1c2128;}}
     .empty{{padding:40px;text-align:center;color:var(--muted);}}
+    @media(max-width:600px){{
+      div[style*="grid-template-columns:repeat(4"]{{grid-template-columns:repeat(2,1fr)!important;}}
+    }}
   </style>
 </head>
 <body>
   <h1>🚀 漲停縮量 <span>洗盤起飛</span> 偵測系統</h1>
-  <p class="meta">台北時間：{t}　｜　選股區間：1~10 個交易日整理</p>
+  <p class="meta">台北時間：{t}　｜　選股區間：1~23 個交易日整理</p>
   <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:10px 18px;margin-bottom:14px;font-size:.82rem;display:flex;gap:24px;flex-wrap:wrap;align-items:center;">
     <span style="color:{mkt_warn_color};font-weight:700">{mkt_warn_text}</span>
     {twii_badge}
   </div>
   {count_info}
+
+  <!-- 今日操作清單 -->
+  <div style="margin-bottom:24px;">
+    <h2 style="font-size:1rem;color:var(--accent);margin-bottom:12px;border-bottom:1px solid var(--border);padding-bottom:8px;">
+      📋 今日操作清單（🔥二波確認 ＋ ✅可掛單）
+    </h2>
+    {op_cards_html}
+  </div>
   <div class="hint">
     <b>💡 選股邏輯（兩張名單）</b><br>
     📋 <b>觀察名單</b>：首漲停後整理 1~23 個交易日，收盤在漲停價 ±8% 內，整理均量 &lt; 首波70%，守住漲停日最低價，尚未二波（MA5 為加分項）<br>
