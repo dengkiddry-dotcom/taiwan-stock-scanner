@@ -1377,12 +1377,9 @@ def scan(output_dir="charts", base_url="charts"):
             if not all_in_range:
                 continue
 
-            # ── 觸發驗證：今日收盤必須創整理期新高 ──────────────────
+            # ── 整理期收盤高點（供評分用，不作為過濾條件）──────────
             wash_close_highs = [float(close.iloc[wi]) for wi in wash_idxs]
             wash_period_high  = max(wash_close_highs) if wash_close_highs else 0
-
-            if today_close <= wash_period_high:
-                continue   # 未突破整理期收盤高點，跳過
 
             # ── 通過！────────────────────────────────────────────────
             limit_vol   = float(volume.iloc[first_limit_iloc])
@@ -1778,7 +1775,7 @@ def to_html(df, output_file="index.html"):
     <b>💡 選股邏輯（二波攻擊型）</b><br>
     第一關：首次漲停（近三個月內無前例），整理 2~6 天（距今 3~8 根）<br>
     第二關：整理期每天收盤在漲停價 ±5% 以內（高檔盤整，不跑遠）<br>
-    第三關：<b>今日收盤創整理期新高</b>（二波突破確認，不要求再度漲停）<br>
+
     第四關（型態評分）：整理緊縮度、二波量能、均線排列、K 棒型態、季線突破等綜合評分<br>
     第五關（產業位階）：依同產業均線結構加減分，區分復甦、成長、高檔與衰退<br>
     📊 最終輸出：整理天數、二波量/首波比、停損參考（整理低點）、2R目標價與回測表現<br>
