@@ -6,6 +6,31 @@ import time
 import os
 import json
 
+# ── 台股漲停價計算（含跳動價位）────────────────────────────────
+def calc_limit_price(prev_close: float) -> float:
+    """依台股跳動價位規則計算漲停價"""
+    raw = prev_close * 1.1
+
+    # 依跳動單位無條件捨去
+    if raw < 10:
+        tick = 0.01
+    elif raw < 50:
+        tick = 0.05
+    elif raw < 100:
+        tick = 0.1
+    elif raw < 500:
+        tick = 0.5
+    elif raw < 1000:
+        tick = 1.0
+    elif raw < 5000:
+        tick = 5.0
+    else:
+        tick = 10.0
+
+    import math
+    return math.floor(raw / tick) * tick
+
+
 # ── 抓取中文名稱對照表 ────────────────────────────────────────
 def fetch_name_map() -> dict:
     name_map = {}
@@ -52,7 +77,7 @@ def analyze_pattern(df: pd.DataFrame, limit_days: list) -> dict:
             h = float(high.loc[last_ld])
             c = float(close.loc[last_ld])
             prev_close = float(close.iloc[list(close.index).index(last_ld) - 1])
-            limit_price = round(prev_close * 1.1, 2)
+            limit_price = calc_limit_price(prev_close)
 
             if o >= limit_price * 0.999:
                 limit_quality = "一字板（最強）"
@@ -272,9 +297,9 @@ def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, pat
   .wrap-title{{ font-size:.68rem; color:var(--muted); text-transform:uppercase;
                 letter-spacing:.06em; margin-bottom:10px; }}
   canvas{{ display:block; width:100%; cursor:crosshair; }}
-  #tip{{ position:absolute; background:#1c2128; border:1px solid var(--border);
-         border-radius:6px; padding:10px 14px; font-size:.78rem; pointer-events:none;
-         display:none; z-index:10; line-height:1.9; min-width:130px; }}
+  #tip{{ background:var(--panel); border:1px solid var(--border);
+         border-radius:6px; padding:10px 16px; font-size:.82rem;
+         line-height:1.8; flex-wrap:wrap; display:flex; gap:12px; align-items:center; }}
   .legend{{ display:flex; gap:18px; font-size:.72rem; color:var(--muted); margin-top:8px; margin-bottom:12px; }}
   .dot{{ display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; }}
   .score-ring{{ font-size:2.5rem; font-weight:700; color:{score_color}; }}
@@ -325,7 +350,6 @@ def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, pat
 <div class="wrap">
   <div class="wrap-title">K 線圖（近兩年）</div>
   <canvas id="kc"></canvas>
-  <div id="tip"></div>
 </div>
 <div class="legend">
   <span><span class="dot" style="background:var(--up)"></span>上漲</span>
@@ -342,6 +366,11 @@ def generate_chart_html(symbol, name, df, limit_days, is_washing, wash_info, pat
 <div class="wrap" style="padding:12px 14px;">
   <div class="wrap-title">成交量</div>
   <canvas id="vc"></canvas>
+</div>
+
+<!-- 資訊列（固定在圖下方） -->
+<div id="tip" style="margin-bottom:14px;">
+  <span style="color:var(--muted)">← 滑鼠移到 K 線圖查看詳細資訊</span>
 </div>
 
 
@@ -454,31 +483,32 @@ function draw() {{
   }});
 
 
-  // tooltip
+
+  // 資訊列（固定在圖下方，不遮擋 K 線）
   kcan.onmousemove=e=>{{
     const r=kcan.getBoundingClientRect();
     const i=Math.round((e.clientX-r.left-PL)/gap-0.5);
-    if(i<0||i>=n){{tip.style.display='none';return;}}
+    if(i<0||i>=n) return;
     const d=DATA[i];
     const col=d.limit?'#ffa500':(d.close>=d.open?'#26a641':'#f85149');
     const chg=((d.close-d.open)/d.open*100).toFixed(2);
-    tip.innerHTML=`<div style="color:#8b949e;margin-bottom:4px">${{d.date}}</div>
-      <div>開 <b>${{d.open}}</b></div><div>高 <b>${{d.high}}</b></div>
-      <div>低 <b>${{d.low}}</b></div>
-      <div>收 <b style="color:${{col}}">${{d.close}}</b> (${{chg>0?'+':''}}${{chg}}%)</div>
-      <div>量 <b>${{(d.volume/1000).toFixed(0)}}K</b></div>
-      ${{d.ma5  ? `<div style="color:#f0c040">MA5 <b>${{d.ma5}}</b></div>` : ''}}
-      ${{d.ma10 ? `<div style="color:#e06080">MA10 <b>${{d.ma10}}</b></div>` : ''}}
-      ${{d.ma20 ? `<div style="color:#58a6ff">MA20 <b>${{d.ma20}}</b></div>` : ''}}
-      ${{d.ma60  ? `<div style="color:#bc8cff">MA60 <b>${{d.ma60}}</b></div>` : ''}}
-      ${{d.ma240 ? `<div style="color:#ff8c42">MA240 <b>${{d.ma240}}</b></div>` : ''}}
-      ${{d.limit?'<div style="color:#ffa500;font-weight:700;margin-top:4px">🔥 漲停</div>':''}}`;
-    tip.style.display='block';
-    const tx=e.clientX-r.left+14;
-    tip.style.left=(tx+130>w?tx-150:tx)+'px';
-    tip.style.top='20px';
+    tip.innerHTML=
+      `<span style="color:var(--muted)">${{d.date}}</span>` +
+      ` 開<b>${{d.open}}</b>` +
+      ` 高<b>${{d.high}}</b>` +
+      ` 低<b>${{d.low}}</b>` +
+      ` 收<b style="color:${{col}}">${{d.close}}</b><span style="color:${{col}}">(${{chg>0?'+':''}}${{chg}}%)</span>` +
+      ` 量<b>${{(d.volume/1000).toFixed(0)}}K</b>` +
+      (d.ma5   ? ` <span style="color:#f0c040">MA5 <b>${{d.ma5}}</b></span>` : '') +
+      (d.ma10  ? ` <span style="color:#e06080">MA10 <b>${{d.ma10}}</b></span>` : '') +
+      (d.ma20  ? ` <span style="color:#58a6ff">MA20 <b>${{d.ma20}}</b></span>` : '') +
+      (d.ma60  ? ` <span style="color:#bc8cff">MA60 <b>${{d.ma60}}</b></span>` : '') +
+      (d.ma240 ? ` <span style="color:#ff8c42">MA240 <b>${{d.ma240}}</b></span>` : '') +
+      (d.limit ? ` <span style="color:#ffa500;font-weight:700">🔥漲停</span>` : '');
   }};
-  kcan.onmouseleave=()=>tip.style.display='none';
+  kcan.onmouseleave=()=>{{
+    tip.innerHTML='<span style="color:var(--muted)">← 滑鼠移到 K 線圖查看詳細資訊</span>';
+  }};
 }}
 
 draw();
@@ -581,7 +611,7 @@ def scan(output_dir="charts", base_url="charts"):
                     if iloc_pos == 0:
                         continue
                     prev_c = float(close.iloc[iloc_pos - 1])
-                    limit_price = round(prev_c * 1.1, 2)
+                    limit_price = calc_limit_price(prev_c)
                     day_close   = float(close.loc[idx])
                     if day_close >= limit_price * 0.999:
                         limit_close_days.append(idx)
@@ -599,7 +629,7 @@ def scan(output_dir="charts", base_url="charts"):
                     if iloc_pos == 0:
                         continue
                     prev_c = float(close.iloc[iloc_pos - 1])
-                    limit_price = round(prev_c * 1.1, 2)
+                    limit_price = calc_limit_price(prev_c)
                     day_close   = float(close.loc[idx])
                     if day_close >= limit_price * 0.999:
                         all_limit_close.append(idx)
@@ -630,7 +660,7 @@ def scan(output_dir="charts", base_url="charts"):
             is_washing = shrink and hold_low and above_ma
 
             vol_ratio_pct = f"{round((curr_vol / limit_vol) * 100)}%"
-            days_since    = (today - last_limit_date.to_pydatetime()).days
+            days_since    = len([d for d in trading_days if d > last_limit_date])
 
             code   = s.split('.')[0]
             market = "上市" if s.endswith(".TW") else "上櫃"
@@ -753,6 +783,21 @@ def scan(output_dir="charts", base_url="charts"):
             ps = pattern['score']
             pattern['grade'] = "🔥🔥 極強" if ps >= 140 else "🔥 強" if ps >= 100 else "⚠️ 普通" if ps >= 60 else "❌ 弱"
 
+            # ── 修改4：是否突破洗盤區間 ────────────────────────
+            try:
+                limit_idx  = list(close.index).index(last_limit_date)
+                wash_highs = df['High'].iloc[limit_idx+1:-1]
+                if len(wash_highs) > 0:
+                    wash_high   = float(wash_highs.max())
+                    today_close = float(close.iloc[-1])
+                    is_breakout = today_close > wash_high
+                else:
+                    is_breakout = False
+            except Exception:
+                is_breakout = False
+
+            breakout_str = "🔥 突破" if is_breakout else "-"
+
             # ── 產生 K 線圖 ────────────────────────────────────
             chart_file      = os.path.join(output_dir, f"{code}.html")
             chart_link      = f"{base_url}/{code}.html" 
@@ -779,6 +824,7 @@ def scan(output_dir="charts", base_url="charts"):
                 "漲停板":     pattern['limit_quality'],
                 "收盤價":    round(curr_price, 2),
                 "漲停軌跡":   " / ".join(dates),
+                "突破洗盤":    breakout_str,
             })
 
         except Exception as e:
