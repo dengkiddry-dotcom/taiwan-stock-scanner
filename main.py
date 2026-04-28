@@ -136,7 +136,9 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
         body {{ background:#0d1117; margin:0; font-family:sans-serif; color:#e6edf3; display:flex; flex-direction:column; height:100vh; overflow:hidden; }}
         #header {{ padding:8px 12px; border-bottom:1px solid #30363d; flex-shrink:0; display:flex; flex-wrap:wrap; gap:8px; align-items:center; }}
         #title-row {{ display:flex; align-items:center; gap:8px; width:100%; }}
-        #info {{ font-size:12px; color:#8b949e; margin-left:8px; }}
+        #ohlc-row {{ font-size:12px; color:#8b949e; width:100%; padding:2px 0; }}
+        #ma-row {{ font-size:11px; width:100%; padding:2px 0; display:flex; flex-wrap:wrap; gap:8px; }}
+        #kd-row {{ font-size:11px; width:100%; padding:2px 0; display:flex; gap:12px; }}
         #controls {{ display:flex; flex-wrap:wrap; gap:6px; align-items:center; width:100%; }}
         .btn {{ background:#1c2128; border:1px solid #30363d; color:#e6edf3; padding:4px 10px; border-radius:4px; cursor:pointer; font-size:13px; }}
         .btn.active {{ background:#58a6ff; border-color:#58a6ff; color:#000; font-weight:bold; }}
@@ -149,8 +151,10 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
         <div id="title-row">
             <a href="../../index.html" style="color:#58a6ff;text-decoration:none;">← 返回</a>
             <strong>{code} {name}</strong>
-            <span id="info"></span>
         </div>
+        <div id="ohlc-row"></div>
+        <div id="ma-row"></div>
+        <div id="kd-row"></div>
         <div id="controls">
             <button class="btn active" onclick="switchPeriod('D',this)">日線</button>
             <button class="btn" onclick="switchPeriod('W',this)">週線</button>
@@ -195,8 +199,8 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
             color:'#26a69a', priceFormat:{{type:'volume'}},
             priceScaleId:'', scaleMargins:{{top:0.8, bottom:0}}
         }});
-        const kLine = kdChart.addLineSeries({{ color:'#10b981', lineWidth:1.5, title:'K' }});
-        const dLine = kdChart.addLineSeries({{ color:'#f97316', lineWidth:1.5, title:'D' }});
+        const kLine = kdChart.addLineSeries({{ color:'#10b981', lineWidth:1.5, lastValueVisible:false, crosshairMarkerVisible:false }});
+        const dLine = kdChart.addLineSeries({{ color:'#f97316', lineWidth:1.5, lastValueVisible:false, crosshairMarkerVisible:false }});
 
         let maSeries = [];
 
@@ -215,15 +219,27 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
             const data = allData[currentPeriod].ohlcv;
             const input = document.getElementById('ma-input').value;
             const periods = input.split(',').map(v => parseInt(v.trim())).filter(v => !isNaN(v) && v > 0);
+            const maRowEl = document.getElementById('ma-row');
+            maRowEl.innerHTML = '';
             periods.forEach((p, i) => {{
+                const color = maColors[i % maColors.length];
                 const s = mainChart.addLineSeries({{
-                    color: maColors[i % maColors.length],
+                    color: color,
                     lineWidth: 1,
-                    title: 'MA' + p,
-                    priceLineVisible: false
+                    priceLineVisible: false,
+                    lastValueVisible: false,
+                    crosshairMarkerVisible: false
                 }});
-                s.setData(calcMA(data, p));
+                const maData = calcMA(data, p);
+                s.setData(maData);
                 maSeries.push(s);
+                // 顯示最新值
+                const lastVal = maData.length > 0 ? maData[maData.length-1].value : '-';
+                const span = document.createElement('span');
+                span.id = 'ma-label-' + p;
+                span.style.cssText = `color:${{color}};white-space:nowrap;`;
+                span.innerHTML = `MA${{p}}: <b>${{lastVal}}</b>`;
+                maRowEl.appendChild(span);
             }});
         }}
 
@@ -281,13 +297,40 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
             kdChart.setCrosshairPosition(p.price, p.time, kLine);
             isSyncingCrosshair = false;
             const d = allData[currentPeriod].ohlcv.find(i => i.time === p.time);
-            if (d) document.getElementById('info').innerHTML = `開:${{d.open}} 高:${{d.high}} 低:${{d.low}} 收:${{d.close}}`;
+            if (d) {{
+                const chg = d.close - d.open;
+                const chgPct = (chg / d.open * 100).toFixed(2);
+                const chgColor = chg >= 0 ? '#ff5252' : '#26a69a';
+                document.getElementById('ohlc-row').innerHTML =
+                    `${{p.time}} &nbsp; 開:<b>${{d.open}}</b> 高:<b style="color:#ff5252">${{d.high}}</b> 低:<b style="color:#26a69a">${{d.low}}</b> 收:<b style="color:${{chgColor}}">${{d.close}}</b> &nbsp;<span style="color:${{chgColor}}">${{chg>=0?'+':''}}${{chg.toFixed(2)}} (${{chg>=0?'+':''}}${{chgPct}}%)</span>`;
+                // 更新均線數值
+                maSeries.forEach((s, i) => {{
+                    const input = document.getElementById('ma-input').value;
+                    const periods = input.split(',').map(v => parseInt(v.trim())).filter(v => !isNaN(v) && v > 0);
+                    const period = periods[i];
+                    if (!period) return;
+                    const maData = calcMA(allData[currentPeriod].ohlcv, period);
+                    const found = maData.find(m => m.time === p.time);
+                    const el = document.getElementById('ma-label-' + period);
+                    if (el && found) el.innerHTML = `MA${{period}}: <b>${{found.value}}</b>`;
+                }});
+            }}
         }});
         kdChart.subscribeCrosshairMove(p => {{
             if (isSyncingCrosshair || !p.time) return;
             isSyncingCrosshair = true;
             mainChart.setCrosshairPosition(p.price, p.time, candles);
             isSyncingCrosshair = false;
+            const kd = allData[currentPeriod];
+            const kFound = kd.k.find(i => i.time === p.time);
+            const dFound = kd.d.find(i => i.time === p.time);
+            if (kFound && dFound) {{
+                const kdColor = kFound.value > dFound.value ? '#10b981' : '#f97316';
+                document.getElementById('kd-row').innerHTML =
+                    `<span style="color:#10b981">K: <b>${{kFound.value}}</b></span>` +
+                    `<span style="color:#f97316">D: <b>${{dFound.value}}</b></span>` +
+                    `<span style="color:${{kdColor}};font-size:10px;">${{kFound.value > dFound.value ? '▲金叉' : '▼死叉'}}</span>`;
+            }}
         }});
 
         loadData('D');
@@ -382,11 +425,20 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
         with open(f"{output_dir}/{code}.html", "w", encoding="utf-8") as f:
             f.write(chart_html)
 
+        # 掛單區間
+        order_low  = round(float(curr_ma60) * 0.985, 2)
+        order_high = round(float(curr_ma60) * 1.005, 2)
+
         return {
             "win": win_rate, "vol_r": float(volume.iloc[-1]) / limit_vol, "dist": abs(dist_ma60),
             "代碼": f"<a href='./charts/{code}.html' target='_blank'>{code} 📊</a>",
-            "名稱": name_map.get(code, code), "勝率": f"{win_rate}%", "進場價": round(curr_c, 2),
-            "停損價": round(limit_low, 2), "目標1": round(t1, 2), "目標2": round(t2, 2), "目標3": round(t3, 2),
+            "名稱": name_map.get(code, code),
+            "收盤價": round(curr_c, 2),
+            "勝率": f"{win_rate}%",
+            "掛單下緣": order_low,
+            "掛單上緣": order_high,
+            "停損價": round(limit_low, 2),
+            "目標1": round(t1, 2), "目標2": round(t2, 2), "目標3": round(t3, 2),
             "K": round(float(k.iloc[-1]), 1), "D": round(float(d.iloc[-1]), 1)
         }
     except Exception as e:
@@ -400,7 +452,7 @@ def scan(today_str, output_dir="charts"):
     name_map = fetch_name_map()
     stocks = get_list()
     today = datetime.now()
-    fetch_start = today - timedelta(days=3650)
+    fetch_start = datetime(2000, 1, 1)  # 抓全歷史資料
     results = []
 
     try:
@@ -442,26 +494,177 @@ def build_history_nav(today_str):
 def to_html(df, today_str, is_history=False):
     t = (datetime.utcnow() + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M")
     nav = build_history_nav(today_str) if not is_history else ""
-    table_html = df.to_html(index=False, escape=False) if not df.empty else "<p>今日無符合條件標的</p>"
-    html = f"""
-    <!DOCTYPE html><html><head><meta charset="utf-8">
+
+    if not df.empty:
+        rows_html = ""
+        for _, row in df.iterrows():
+            # 勝率
+            win_str = str(row.get("勝率", "0%")).replace("%", "")
+            try: win_val = int(win_str)
+            except: win_val = 0
+            if win_val >= 65:
+                win_color = "#ff4040"; win_bg = "#3d1a1a"
+            elif win_val >= 50:
+                win_color = "#ffa500"; win_bg = "#2d2200"
+            else:
+                win_color = "#26a69a"; win_bg = "#0d2420"
+
+            # KD 金叉/死叉
+            try:
+                k_val = float(row.get("K", 50))
+                d_val = float(row.get("D", 50))
+                kd_color = "#ff4040" if k_val > d_val else "#26a69a"
+                kd_tag = "▲金叉" if k_val > d_val else "▼死叉"
+            except:
+                kd_color = "#888"; kd_tag = "-"
+
+            # 收盤價
+            close_val = row.get("收盤價", "")
+            # 停損距離%
+            try:
+                stop = float(row.get("停損價", 0))
+                close_f = float(close_val)
+                stop_pct = round((stop - close_f) / close_f * 100, 1)
+                stop_str = f"{stop} <span style='color:#888;font-size:11px;'>({stop_pct}%)</span>"
+            except:
+                stop_str = str(row.get("停損價", ""))
+
+            rows_html += f"""
+            <tr>
+                <td style="text-align:left;padding-left:10px;min-width:80px;">{row.get("代碼","")}</td>
+                <td style="text-align:left;min-width:70px;color:#ccc;">{row.get("名稱","")}</td>
+                <td style="color:#ff4040;font-weight:bold;font-size:15px;min-width:60px;">{close_val}</td>
+                <td style="min-width:65px;">
+                    <span style="background:{win_bg};color:{win_color};font-weight:bold;padding:4px 8px;border-radius:4px;border:1px solid {win_color};font-size:13px;">{row.get("勝率","")}</span>
+                </td>
+                <td style="color:#ffd700;font-size:12px;min-width:110px;">
+                    <span style="color:#888;font-size:10px;">掛</span> {row.get("掛單下緣","")} <span style="color:#555;">～</span> {row.get("掛單上緣","")}
+                </td>
+                <td style="color:#26a69a;min-width:100px;">{stop_str}</td>
+                <td style="color:#ff8c00;min-width:60px;">{row.get("目標1","")}</td>
+                <td style="color:#ff6060;min-width:60px;">{row.get("目標2","")}</td>
+                <td style="color:#ff3030;font-weight:bold;min-width:60px;">{row.get("目標3","")}</td>
+                <td style="min-width:90px;">
+                    <span style="color:{kd_color};font-weight:bold;">{row.get("K","")}</span>
+                    <span style="color:#555;">/</span>
+                    <span style="color:{kd_color};">{row.get("D","")}</span>
+                    <br><span style="color:{kd_color};font-size:10px;">{kd_tag}</span>
+                </td>
+            </tr>"""
+
+        table_html = f"""
+        <table>
+            <thead>
+                <tr>
+                    <th>代碼 📊</th>
+                    <th>名稱</th>
+                    <th>收盤價</th>
+                    <th>勝率</th>
+                    <th>建議掛單區間</th>
+                    <th>停損價</th>
+                    <th>目標①</th>
+                    <th>目標②</th>
+                    <th>目標③</th>
+                    <th>KD 狀態</th>
+                </tr>
+            </thead>
+            <tbody>{rows_html}</tbody>
+        </table>"""
+    else:
+        table_html = """
+        <div style='text-align:center;padding:60px 20px;color:#444;'>
+            <div style='font-size:32px;margin-bottom:12px;'>📭</div>
+            <div style='font-size:14px;'>今日無符合條件標的</div>
+        </div>"""
+
+    count_str = f"共 {len(df)} 檔" if not df.empty else "0 檔"
+
+    html = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1.0">
-    <title>D-Pattern 選股{"（" + today_str + "）" if is_history else ""}</title>
+    <title>D-Pattern 選股{"｜" + today_str if is_history else ""}</title>
     <style>
-        body{{ background:#0d1117; color:#e6edf3; font-family:sans-serif; padding:16px; }}
-        .container {{ width:100%; overflow-x:auto; }}
-        table{{ width:100%; border-collapse:collapse; background:#161b22; border-radius:8px; }}
-        th,td{{ padding:10px; border:1px solid #30363d; text-align:center; min-width:80px; }}
-        th{{ background:#1c2128; color:#8b949e; font-size:12px; }}
-        a{{ color:#58a6ff; text-decoration:none; font-weight:bold; }}
+        * {{ box-sizing:border-box; margin:0; padding:0; }}
+        body {{ background:#0d0d0d; color:#e0e0e0; font-family:"Microsoft JhengHei","PingFang TC",sans-serif; font-size:13px; min-height:100vh; }}
+        #topbar {{
+            background:linear-gradient(135deg,#1a0a0a 0%,#1a1a2e 100%);
+            border-bottom:2px solid #ff4040;
+            padding:10px 14px;
+            display:flex; justify-content:space-between; align-items:center;
+            position:sticky; top:0; z-index:100;
+        }}
+        .topbar-left {{ display:flex; align-items:center; gap:10px; }}
+        .topbar-title {{ color:#ff4040; font-size:17px; font-weight:bold; letter-spacing:1px; }}
+        .topbar-count {{ background:#2a0a0a; color:#ff6060; border:1px solid #ff4040; padding:2px 8px; border-radius:10px; font-size:11px; }}
+        .topbar-meta {{ color:#666; font-size:11px; text-align:right; line-height:1.6; }}
+        .nav-bar {{
+            background:#111;
+            padding:6px 14px;
+            border-bottom:1px solid #1e1e1e;
+            font-size:11px;
+            color:#555;
+            overflow-x:auto;
+            white-space:nowrap;
+        }}
+        .nav-bar a {{ color:#58a6ff; text-decoration:none; margin-right:8px; }}
+        .container {{ width:100%; overflow-x:auto; padding:8px 4px; }}
+        table {{ width:100%; border-collapse:collapse; min-width:720px; }}
+        thead tr {{
+            background:#1a1a1a;
+            border-bottom:2px solid #ff4040;
+        }}
+        th {{
+            padding:10px 8px;
+            color:#888;
+            font-size:11px;
+            text-align:center;
+            letter-spacing:0.5px;
+            white-space:nowrap;
+            font-weight:normal;
+        }}
+        tbody tr {{
+            border-bottom:1px solid #1a1a1a;
+            transition:background 0.1s;
+        }}
+        tbody tr:nth-child(even) {{ background:#0f0f0f; }}
+        tbody tr:hover {{ background:#1e1e1e; }}
+        td {{
+            padding:10px 8px;
+            text-align:center;
+            white-space:nowrap;
+        }}
+        a {{ color:#58a6ff; text-decoration:none; font-weight:bold; }}
+        a:hover {{ color:#ff4040; }}
+        .section-label {{
+            padding:6px 14px;
+            font-size:11px;
+            color:#555;
+            border-bottom:1px solid #1a1a1a;
+            letter-spacing:1px;
+        }}
+        .footer {{
+            padding:14px;
+            text-align:center;
+            color:#333;
+            font-size:11px;
+            border-top:1px solid #1a1a1a;
+            margin-top:4px;
+        }}
     </style>
     </head><body>
-    <h1>🚀 D-Pattern 轉機偵測{"（" + today_str + "）" if is_history else ""}</h1>
-    <p>更新：{t} (台北)</p>
-    {nav}
+    <div id="topbar">
+        <div class="topbar-left">
+            <span class="topbar-title">📈 D-Pattern</span>
+            <span class="topbar-count">{count_str}</span>
+        </div>
+        <div class="topbar-meta">
+            {"📅 " + today_str + "<br>" if is_history else ""}更新 {t} 台北
+        </div>
+    </div>
+    <div class="nav-bar">{nav if nav else "📅 歷史紀錄：暫無"}</div>
+    <div class="section-label">▸ 葛蘭碧轉機｜突破年線 → 回測季線｜依勝率排序</div>
     <div class="container">{table_html}</div>
-    </body></html>
-    """
+    <div class="footer">本系統僅供參考，不構成投資建議。投資有風險，操作須謹慎。</div>
+    </body></html>"""
     return html
 
 # ── 自動清理 ──────────────────────────────────────────────────
