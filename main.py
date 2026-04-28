@@ -83,7 +83,7 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
         #kd-chart{{ height:150px; width:100%; border-top:1px solid #30363d; flex-shrink:0; }}
     </style>
     </head><body>
-    <div id="header"><a href="../index.html" style="color:#58a6ff;text-decoration:none;margin-right:12px;">← 返回</a><strong>{code} {name}</strong> <span id="info"></span></div>
+    <div id="header"><a href="../../index.html" style="color:#58a6ff;text-decoration:none;margin-right:12px;">← 返回</a><strong>{code} {name}</strong> <span id="info"></span></div>
     <div id="main-chart"></div>
     <div id="kd-chart"></div>
     <script>
@@ -93,7 +93,11 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
             rightPriceScale:{{ borderColor:'#30363d' }},
             timeScale:{{ borderColor:'#30363d', visible: false }},
             crosshair:{{ mode:0 }},
-            handleScale: false,
+            handleScale: {{
+                axisPressedMouseMove: false,
+                mouseWheel: false,
+                pinch: true
+            }},
             handleScroll: {{
                 mouseWheel: false,
                 pressedMouseMove: true,
@@ -177,14 +181,22 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
         if actual_ticker and actual_ticker != s:
             return None
 
-        close = df['Close'].squeeze().astype(float)
-        volume = df['Volume'].squeeze().astype(float)
+        # 強制將所有欄位壓成一維 Series，防止多執行緒下 yfinance 回傳 MultiIndex 殘留
+        for col in df.columns:
+            df[col] = df[col].squeeze()
+
+        close = pd.to_numeric(df['Close'], errors='coerce').dropna()
+        volume = pd.to_numeric(df['Volume'], errors='coerce').dropna()
+        df = df.loc[close.index]  # 對齊 index
+        if len(close) < 240: return None
+
         ma60 = close.rolling(60).mean()
         ma240 = close.rolling(240).mean()
 
-        recent_close = close.iloc[-90:]; recent_ma240 = ma240.iloc[-90:]
-        has_broken_ma240 = ((recent_close > recent_ma240) & (recent_close.shift(1) <= recent_ma240.shift(1))).any()
-        if not has_broken_ma240: return None
+        recent_close = close.iloc[-90:]
+        recent_ma240 = ma240.iloc[-90:]
+        broken = (recent_close > recent_ma240) & (recent_close.shift(1) <= recent_ma240.shift(1))
+        if not bool(broken.any()): return None
 
         p_min_90 = float(recent_close.min())
         p_max_90 = float(recent_close.max())
