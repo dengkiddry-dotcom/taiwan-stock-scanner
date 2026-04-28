@@ -150,6 +150,12 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
     """
 
 # ── 單支股票處理（供多執行緒呼叫）────────────────────────────
+def safe_float(val):
+    """安全地將 Series 或純數值轉為 float，避免 ambiguous truth value"""
+    if isinstance(val, pd.Series):
+        return float(val.iloc[0])
+    return float(val)
+
 def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
     """處理單支股票，回傳 result dict 或 None"""
     try:
@@ -158,8 +164,14 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        close = df['Close'].astype(float)
-        volume = df['Volume'].astype(float)
+        # 驗證股票代碼未被 yfinance redirect 到其他股票
+        expected_code = s.split('.')[0]
+        actual_ticker = df.columns.get_level_values(1)[0] if isinstance(df.columns, pd.MultiIndex) else None
+        if actual_ticker and actual_ticker != s:
+            return None
+
+        close = df['Close'].squeeze().astype(float)
+        volume = df['Volume'].squeeze().astype(float)
         ma60 = close.rolling(60).mean()
         ma240 = close.rolling(240).mean()
 
@@ -167,32 +179,34 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
         has_broken_ma240 = ((recent_close > recent_ma240) & (recent_close.shift(1) <= recent_ma240.shift(1))).any()
         if not has_broken_ma240: return None
 
-        p_min_90 = recent_close.min(); p_max_90 = recent_close.max()
+        p_min_90 = float(recent_close.min())
+        p_max_90 = float(recent_close.max())
         wave_gain = (p_max_90 - p_min_90) / p_min_90
         if wave_gain < 0.30: return None
 
         limit_dates = [close.index[j] for j in range(len(close)-30, len(close))
-                       if j > 0 and close.iloc[j] >= (calc_limit_price(close.iloc[j-1]) - 0.01)]
+                       if j > 0 and float(close.iloc[j]) >= (calc_limit_price(float(close.iloc[j-1])) - 0.01)]
         if not limit_dates: return None
 
         last_limit_date = limit_dates[-1]
-        limit_vol = volume.loc[last_limit_date]
-        limit_low = df.loc[last_limit_date, 'Low']
+        limit_vol = safe_float(volume.loc[last_limit_date])   # 修正：避免 Series ambiguous
+        limit_low = safe_float(df.loc[last_limit_date, 'Low']) # 修正：避免 Series ambiguous
 
-        curr_c = close.iloc[-1]; curr_ma60 = ma60.iloc[-1]
+        curr_c = float(close.iloc[-1])
+        curr_ma60 = float(ma60.iloc[-1])
         dist_ma60 = (curr_c - curr_ma60) / curr_ma60
         if abs(dist_ma60) > 0.025: return None
 
         win_kd = 9
-        rsv = ((close - df['Low'].rolling(win_kd).min()) /
-               (df['High'].rolling(win_kd).max() - df['Low'].rolling(win_kd).min()) * 100).fillna(50)
+        rsv = ((close - df['Low'].squeeze().rolling(win_kd).min()) /
+               (df['High'].squeeze().rolling(win_kd).max() - df['Low'].squeeze().rolling(win_kd).min()) * 100).fillna(50)
         k = rsv.ewm(com=2).mean(); d = k.ewm(com=2).mean()
 
         win_rate = 45
-        if ma60.iloc[-1] > ma60.iloc[-5]: win_rate += 10
+        if float(ma60.iloc[-1]) > float(ma60.iloc[-5]): win_rate += 10
         else: win_rate -= 15
-        if volume.iloc[-1] < limit_vol * 0.4: win_rate += 10
-        if k.iloc[-1] > d.iloc[-1] and k.iloc[-2] <= d.iloc[-2]: win_rate += 5
+        if float(volume.iloc[-1]) < limit_vol * 0.4: win_rate += 10
+        if float(k.iloc[-1]) > float(d.iloc[-1]) and float(k.iloc[-2]) <= float(d.iloc[-2]): win_rate += 5
         days_since = (today - last_limit_date).days
         if 10 <= days_since <= 30: win_rate += 5
         if twii_bull: win_rate += 5
@@ -207,10 +221,10 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
             f.write(chart_html)
 
         return {
-            "win": win_rate, "vol_r": float(volume.iloc[-1]/limit_vol), "dist": abs(dist_ma60),
+            "win": win_rate, "vol_r": float(volume.iloc[-1]) / limit_vol, "dist": abs(dist_ma60),
             "代碼": f"<a href='./charts/{code}.html' target='_blank'>{code} 📊</a>",
-            "名稱": name_map.get(code, code), "勝率": f"{win_rate}%", "進場價": round(float(curr_c), 2),
-            "停損價": round(float(limit_low), 2), "目標1": round(t1, 2), "目標2": round(t2, 2), "目標3": round(t3, 2),
+            "名稱": name_map.get(code, code), "勝率": f"{win_rate}%", "進場價": round(curr_c, 2),
+            "停損價": round(limit_low, 2), "目標1": round(t1, 2), "目標2": round(t2, 2), "目標3": round(t3, 2),
             "K": round(float(k.iloc[-1]), 1), "D": round(float(d.iloc[-1]), 1)
         }
     except Exception as e:
