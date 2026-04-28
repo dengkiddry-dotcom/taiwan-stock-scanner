@@ -12,7 +12,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ── 設定 ─────────────────────────────────────────────────────
 KEEP_DAYS = 30
 MAX_WORKERS = 5
-INSTITUTIONAL_MONTHS = 3  # 三大法人抓幾個月
 
 # ── 核心工具函式 ──────────────────────────────────────────────
 def calc_limit_price(prev_close: float) -> float:
@@ -47,84 +46,29 @@ def get_list(target=2000):
         print(f"[系統] 清單抓取失敗: {e}")
     return res[:target]
 
-# ── 三大法人資料抓取 ──────────────────────────────────────────
-def fetch_institutional_daily(code: str, months: int = 3) -> list:
-    """
-    抓取單支股票每日三大法人買賣超。
-    T86 API 以月份查詢，每次回傳該月所有交易日的全市場資料。
-    欄位索引（已驗證）：
-      0: 證券代號, 4: 外資買賣超, 7: 投信買賣超, 8: 自營商買賣超
-    """
-    result = []
-    today = datetime.now()
-
-    def parse_num(s):
-        try: return int(str(s).replace(',', '').replace('+', '').strip())
-        except: return 0
-
-    # 產生過去 N 個月的查詢日期（每月1號）
-    month_list = []
-    for m in range(months):
-        d = today.replace(day=1) - timedelta(days=30 * m)
-        month_list.append(d.strftime('%Y%m01'))
-
-    for date_str in month_list:
-        try:
-            url = (f"https://www.twse.com.tw/rwd/zh/fund/T86"
-                   f"?date={date_str}&selectType=ALLBUT0999&response=json")
-            r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
-            data = r.json()
-            if data.get('stat') != 'OK':
-                continue
-
-            rows = data.get('data', [])
-            date_label = data.get('date', date_str[:6])  # API 有時會回傳查詢日期
-
-            for row in rows:
-                if len(row) < 9: continue
-                row_code = str(row[0]).strip()
-                if row_code != code: continue
-
-                # 解析民國年日期，例如 "113/04/28" → "2024-04-28"
-                raw_date = str(row[0] if len(row) == 1 else date_label)
-                try:
-                    # T86 當日報表沒有逐日欄位，用查詢月份標記
-                    year = int(date_str[:4])
-                    month = int(date_str[4:6])
-                    display_date = f"{year}/{month:02d}"
-                except:
-                    display_date = date_str[:6]
-
-                result.append({
-                    "date": display_date,
-                    "foreign": parse_num(row[4]),   # 外資買賣超股數
-                    "invest":  parse_num(row[7]),   # 投信買賣超股數
-                    "dealer":  parse_num(row[8]),   # 自營商買賣超股數
-                })
-                break  # 找到該股票就跳出
-
-            time.sleep(0.5)
-        except Exception as e:
-            continue
-
-    return list(reversed(result))
 
 # ── HTML 圖表產生器 ───────────────────────────────────────────
-def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, ma240_series, k_series, d_series, institutional_data=None):
+def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, ma240_series, k_series, d_series):
     code = symbol.split('.')[0]
 
     def df_to_ohlcv(d, lim_dates):
         result = []
         for idx, row in d.iterrows():
-            result.append({
-                "time": idx.strftime('%Y-%m-%d'),
-                "open": round(float(row['Open']), 2),
-                "high": round(float(row['High']), 2),
-                "low": round(float(row['Low']), 2),
-                "close": round(float(row['Close']), 2),
-                "value": float(row['Volume']),
-                "isLimit": idx in lim_dates
-            })
+            try:
+                o = round(float(row['Open']), 2)
+                h = round(float(row['High']), 2)
+                l = round(float(row['Low']), 2)
+                c = round(float(row['Close']), 2)
+                v = float(row['Volume'])
+                # 過濾掉任何 NaN 或無效資料
+                if any(x != x for x in [o, h, l, c, v]): continue
+                if h < l or h <= 0 or c <= 0: continue
+                result.append({
+                    "time": idx.strftime('%Y-%m-%d'),
+                    "open": o, "high": h, "low": l, "close": c,
+                    "value": v, "isLimit": idx in lim_dates
+                })
+            except: continue
         return result
 
     def calc_kd(d):
@@ -159,6 +103,17 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
 
     buy_js = buy_date.strftime('%Y-%m-%d')
 
+    # 如果日線資料是空的，回傳錯誤提示頁面
+    if not daily_data:
+        return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+        <meta name="viewport" content="width=device-width,initial-scale=1.0">
+        <title>{code} {name}</title></head>
+        <body style="background:#0d1117;color:#e6edf3;font-family:sans-serif;padding:32px;">
+        <a href="../../index.html" style="color:#58a6ff;">← 返回</a>
+        <h2 style="margin-top:24px;">{code} {name}</h2>
+        <p style="color:#8b949e;">無法取得此股票的 K 線資料，可能原因：yfinance 不支援此代碼，或資料尚未更新。</p>
+        </body></html>"""
+
     daily_js = json.dumps(daily_data)
     weekly_js = json.dumps(weekly_data)
     monthly_js = json.dumps(monthly_data)
@@ -169,65 +124,7 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
     monthly_k_js = json.dumps(monthly_k)
     monthly_d_js = json.dumps(monthly_d)
 
-    # 三大法人資料
-    inst_js = json.dumps(institutional_data or [])
-    has_inst = bool(institutional_data)
-    inst_section = """
-    <div id="inst-chart" style="width:100%;border-top:1px solid #30363d;flex-shrink:0;padding:8px 12px;">
-        <div style="font-size:11px;color:#8b949e;margin-bottom:4px;">📊 三大法人買賣超（近3個月，單位：張）</div>
-        <canvas id="instCanvas" style="width:100%;height:120px;"></canvas>
-    </div>
-    """ if has_inst else ""
 
-    inst_script = f"""
-    // ── 三大法人柱狀圖 ──
-    const instData = {inst_js};
-    if (instData.length > 0) {{
-        const canvas = document.getElementById('instCanvas');
-        const ctx = canvas.getContext('2d');
-        canvas.width = canvas.offsetWidth;
-        canvas.height = 120;
-        const W = canvas.width, H = canvas.height;
-        const n = instData.length;
-        const barW = Math.floor(W / (n * 3 + n + 1));
-        const gap = Math.floor(barW * 0.3);
-        const maxVal = Math.max(...instData.flatMap(d => [Math.abs(d.foreign), Math.abs(d.invest), Math.abs(d.dealer)])) || 1;
-        const midY = H * 0.5;
-        const scale = midY / maxVal * 0.9;
-
-        instData.forEach((d, i) => {{
-            const x0 = gap + i * (barW * 3 + gap * 2);
-            [['foreign','#38bdf8'],['invest','#f59e0b'],['dealer','#a78bfa']].forEach(([key, color], j) => {{
-                const val = d[key];
-                const bh = Math.abs(val) * scale;
-                const x = x0 + j * (barW + 1);
-                const y = val >= 0 ? midY - bh : midY;
-                ctx.fillStyle = val >= 0 ? color : color + '88';
-                ctx.fillRect(x, y, barW, bh || 1);
-            }});
-            ctx.fillStyle = '#8b949e';
-            ctx.font = '9px sans-serif';
-            ctx.textAlign = 'center';
-            ctx.fillText(d.date, x0 + barW * 1.5, H - 2);
-        }});
-
-        // 圖例
-        ctx.font = '10px sans-serif';
-        [['外資','#38bdf8',0],['投信','#f59e0b',50],['自營','#a78bfa',100]].forEach(([label, color, ox]) => {{
-            ctx.fillStyle = color;
-            ctx.fillRect(ox, 2, 10, 10);
-            ctx.fillStyle = '#e6edf3';
-            ctx.fillText(label, ox + 14, 11);
-        }});
-
-        // 零軸線
-        ctx.strokeStyle = '#30363d';
-        ctx.beginPath();
-        ctx.moveTo(0, midY);
-        ctx.lineTo(W, midY);
-        ctx.stroke();
-    }}
-    """ if has_inst else ""
 
     return f"""
     <!DOCTYPE html><html><head><meta charset="utf-8">
@@ -264,7 +161,6 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
     </div>
     <div id="main-chart"></div>
     <div id="kd-chart"></div>
-    {inst_section}
     <script>
         const allData = {{
             D: {{ ohlcv: {daily_js}, k: {daily_k_js}, d: {daily_d_js} }},
@@ -395,7 +291,6 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
         }});
 
         loadData('D');
-        {inst_script}
     </script></body></html>
     """
 
@@ -407,28 +302,31 @@ def safe_float(val):
 
 def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
     try:
-        # 用 session 隔離避免多執行緒資料污染
         import yfinance as _yf
-        df = _yf.download(s, start=fetch_start, end=today, progress=False, threads=False)
-        if df is None or df.empty or len(df) < 240: return None
+        try:
+            df = _yf.download(s, start=fetch_start, end=today, progress=False, threads=False, timeout=15)
+        except:
+            return None
+
+        if df is None or df.empty: return None
 
         # 處理 MultiIndex
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # 確認欄位存在
+        # 修正欄位名稱大小寫不一致（新版 yfinance 可能回傳小寫）
+        df.columns = [c.capitalize() for c in df.columns]
+
         required = ['Open', 'High', 'Low', 'Close', 'Volume']
         if not all(c in df.columns for c in required): return None
-        df = df[required].copy()
 
-        # 強制每個欄位都是一維
-        for col in df.columns:
-            df[col] = pd.to_numeric(df[col].squeeze(), errors='coerce')
+        # 確保資料是 float 且移除 Close 為 NaN 的列
+        df = df[required].astype(float).dropna(subset=['Close'])
 
-        close = df['Close'].dropna()
-        volume = df['Volume'].dropna()
-        df = df.loc[close.index]
-        if len(close) < 240: return None
+        if len(df) < 240: return None
+
+        close = df['Close']
+        volume = df['Volume'].fillna(0)
 
         ma60 = close.rolling(60).mean()
         ma240 = close.rolling(240).mean()
@@ -477,18 +375,9 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
 
         code = s.split('.')[0]
 
-        # 抓三大法人（只對上市股票，上櫃暫不支援）
-        inst_data = []
-        if s.endswith('.TW'):
-            try:
-                inst_data = fetch_institutional_daily(code, INSTITUTIONAL_MONTHS)
-            except:
-                inst_data = []
-
         chart_html = generate_stock_chart(
             s, name_map.get(code, code), df, limit_dates,
-            close.index[-1], ma60, ma240, k, d,
-            institutional_data=inst_data
+            close.index[-1], ma60, ma240, k, d
         )
         with open(f"{output_dir}/{code}.html", "w", encoding="utf-8") as f:
             f.write(chart_html)
