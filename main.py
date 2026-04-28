@@ -10,12 +10,12 @@ import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ── 設定 ─────────────────────────────────────────────────────
-KEEP_DAYS = 30        # 保留幾天的歷史紀錄
-MAX_WORKERS = 5       # 多執行緒下載數量（避免被封鎖）
+KEEP_DAYS = 30
+MAX_WORKERS = 5
+INSTITUTIONAL_MONTHS = 3  # 三大法人抓幾個月
 
 # ── 核心工具函式 ──────────────────────────────────────────────
 def calc_limit_price(prev_close: float) -> float:
-    """計算台股漲停價，符合台股 Tick 規則"""
     raw = prev_close * 1.1
     if raw < 10: tick = 0.01
     elif raw < 50: tick = 0.05
@@ -26,7 +26,6 @@ def calc_limit_price(prev_close: float) -> float:
     return math.floor(raw / tick + 0.0001) * tick
 
 def fetch_name_map() -> dict:
-    """抓取台股名稱對照表"""
     name_map = {}
     try:
         r = requests.get("https://openapi.twse.com.tw/v1/exchange_report/STOCK_DAY_ALL", timeout=10)
@@ -38,7 +37,6 @@ def fetch_name_map() -> dict:
     return name_map
 
 def get_list(target=2000):
-    """獲取台股上市櫃清單"""
     res = []
     try:
         r = requests.get("https://openapi.twse.com.tw/v1/exchange_report/STOCK_DAY_ALL", timeout=15)
@@ -49,9 +47,70 @@ def get_list(target=2000):
         print(f"[系統] 清單抓取失敗: {e}")
     return res[:target]
 
+# ── 三大法人資料抓取 ──────────────────────────────────────────
+def fetch_institutional_daily(code: str, months: int = 3) -> list:
+    """
+    抓取單支股票每日三大法人買賣超。
+    T86 API 以月份查詢，每次回傳該月所有交易日的全市場資料。
+    欄位索引（已驗證）：
+      0: 證券代號, 4: 外資買賣超, 7: 投信買賣超, 8: 自營商買賣超
+    """
+    result = []
+    today = datetime.now()
+
+    def parse_num(s):
+        try: return int(str(s).replace(',', '').replace('+', '').strip())
+        except: return 0
+
+    # 產生過去 N 個月的查詢日期（每月1號）
+    month_list = []
+    for m in range(months):
+        d = today.replace(day=1) - timedelta(days=30 * m)
+        month_list.append(d.strftime('%Y%m01'))
+
+    for date_str in month_list:
+        try:
+            url = (f"https://www.twse.com.tw/rwd/zh/fund/T86"
+                   f"?date={date_str}&selectType=ALLBUT0999&response=json")
+            r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+            data = r.json()
+            if data.get('stat') != 'OK':
+                continue
+
+            rows = data.get('data', [])
+            date_label = data.get('date', date_str[:6])  # API 有時會回傳查詢日期
+
+            for row in rows:
+                if len(row) < 9: continue
+                row_code = str(row[0]).strip()
+                if row_code != code: continue
+
+                # 解析民國年日期，例如 "113/04/28" → "2024-04-28"
+                raw_date = str(row[0] if len(row) == 1 else date_label)
+                try:
+                    # T86 當日報表沒有逐日欄位，用查詢月份標記
+                    year = int(date_str[:4])
+                    month = int(date_str[4:6])
+                    display_date = f"{year}/{month:02d}"
+                except:
+                    display_date = date_str[:6]
+
+                result.append({
+                    "date": display_date,
+                    "foreign": parse_num(row[4]),   # 外資買賣超股數
+                    "invest":  parse_num(row[7]),   # 投信買賣超股數
+                    "dealer":  parse_num(row[8]),   # 自營商買賣超股數
+                })
+                break  # 找到該股票就跳出
+
+            time.sleep(0.5)
+        except Exception as e:
+            continue
+
+    return list(reversed(result))
+
 # ── HTML 圖表產生器 ───────────────────────────────────────────
-def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, ma240_series, k_series, d_series):
-    """產生包含日週月線切換、自訂均線、KD副圖的完整HTML"""
+def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, ma240_series, k_series, d_series, institutional_data=None):
     code = symbol.split('.')[0]
 
     def df_to_ohlcv(d, lim_dates):
@@ -69,13 +128,12 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
         return result
 
     def calc_kd(d):
-        import pandas as pd
         close = pd.to_numeric(d['Close'].squeeze(), errors='coerce').dropna()
         high = pd.to_numeric(d['High'].squeeze(), errors='coerce').reindex(close.index).fillna(close)
         low = pd.to_numeric(d['Low'].squeeze(), errors='coerce').reindex(close.index).fillna(close)
         win = 9
         denom = high.rolling(win).max() - low.rolling(win).min()
-        denom = denom.replace(0, 1)  # 防止除以零
+        denom = denom.replace(0, 1)
         rsv = ((close - low.rolling(win).min()) / denom * 100).fillna(50)
         k = rsv.ewm(com=2).mean()
         dv = k.ewm(com=2).mean()
@@ -85,29 +143,22 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
         )
 
     def resample_df(d, rule):
-        import pandas as pd
         r = d.resample(rule).agg({
             'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
         }).dropna()
         return r
 
-    # 日線
     daily_data = df_to_ohlcv(df, limit_dates)
     daily_k, daily_d = calc_kd(df)
-
-    # 週線
     df_w = resample_df(df, 'W')
     weekly_data = df_to_ohlcv(df_w, [])
     weekly_k, weekly_d = calc_kd(df_w)
-
-    # 月線
     df_m = resample_df(df, 'ME')
     monthly_data = df_to_ohlcv(df_m, [])
     monthly_k, monthly_d = calc_kd(df_m)
 
     buy_js = buy_date.strftime('%Y-%m-%d')
 
-    import json
     daily_js = json.dumps(daily_data)
     weekly_js = json.dumps(weekly_data)
     monthly_js = json.dumps(monthly_data)
@@ -117,6 +168,66 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
     weekly_d_js = json.dumps(weekly_d)
     monthly_k_js = json.dumps(monthly_k)
     monthly_d_js = json.dumps(monthly_d)
+
+    # 三大法人資料
+    inst_js = json.dumps(institutional_data or [])
+    has_inst = bool(institutional_data)
+    inst_section = """
+    <div id="inst-chart" style="width:100%;border-top:1px solid #30363d;flex-shrink:0;padding:8px 12px;">
+        <div style="font-size:11px;color:#8b949e;margin-bottom:4px;">📊 三大法人買賣超（近3個月，單位：張）</div>
+        <canvas id="instCanvas" style="width:100%;height:120px;"></canvas>
+    </div>
+    """ if has_inst else ""
+
+    inst_script = f"""
+    // ── 三大法人柱狀圖 ──
+    const instData = {inst_js};
+    if (instData.length > 0) {{
+        const canvas = document.getElementById('instCanvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = canvas.offsetWidth;
+        canvas.height = 120;
+        const W = canvas.width, H = canvas.height;
+        const n = instData.length;
+        const barW = Math.floor(W / (n * 3 + n + 1));
+        const gap = Math.floor(barW * 0.3);
+        const maxVal = Math.max(...instData.flatMap(d => [Math.abs(d.foreign), Math.abs(d.invest), Math.abs(d.dealer)])) || 1;
+        const midY = H * 0.5;
+        const scale = midY / maxVal * 0.9;
+
+        instData.forEach((d, i) => {{
+            const x0 = gap + i * (barW * 3 + gap * 2);
+            [['foreign','#38bdf8'],['invest','#f59e0b'],['dealer','#a78bfa']].forEach(([key, color], j) => {{
+                const val = d[key];
+                const bh = Math.abs(val) * scale;
+                const x = x0 + j * (barW + 1);
+                const y = val >= 0 ? midY - bh : midY;
+                ctx.fillStyle = val >= 0 ? color : color + '88';
+                ctx.fillRect(x, y, barW, bh || 1);
+            }});
+            ctx.fillStyle = '#8b949e';
+            ctx.font = '9px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(d.date, x0 + barW * 1.5, H - 2);
+        }});
+
+        // 圖例
+        ctx.font = '10px sans-serif';
+        [['外資','#38bdf8',0],['投信','#f59e0b',50],['自營','#a78bfa',100]].forEach(([label, color, ox]) => {{
+            ctx.fillStyle = color;
+            ctx.fillRect(ox, 2, 10, 10);
+            ctx.fillStyle = '#e6edf3';
+            ctx.fillText(label, ox + 14, 11);
+        }});
+
+        // 零軸線
+        ctx.strokeStyle = '#30363d';
+        ctx.beginPath();
+        ctx.moveTo(0, midY);
+        ctx.lineTo(W, midY);
+        ctx.stroke();
+    }}
+    """ if has_inst else ""
 
     return f"""
     <!DOCTYPE html><html><head><meta charset="utf-8">
@@ -153,8 +264,8 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
     </div>
     <div id="main-chart"></div>
     <div id="kd-chart"></div>
+    {inst_section}
     <script>
-        // ── 資料 ──
         const allData = {{
             D: {{ ohlcv: {daily_js}, k: {daily_k_js}, d: {daily_d_js} }},
             W: {{ ohlcv: {weekly_js}, k: {weekly_k_js}, d: {weekly_d_js} }},
@@ -163,7 +274,6 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
         let currentPeriod = 'D';
         const maColors = ['#f59e0b','#a78bfa','#34d399','#fb7185','#38bdf8','#f97316'];
 
-        // ── 圖表設定 ──
         const chartOptions = {{
             layout:{{ backgroundColor:'#0d1117', textColor:'#d1d4dc' }},
             grid:{{ vertLines:{{color:'#1f2937'}}, horzLines:{{color:'#1f2937'}} }},
@@ -194,7 +304,6 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
 
         let maSeries = [];
 
-        // ── 計算均線 ──
         function calcMA(data, period) {{
             const result = [];
             for (let i = period - 1; i < data.length; i++) {{
@@ -204,7 +313,6 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
             return result;
         }}
 
-        // ── 套用均線 ──
         function applyMA() {{
             maSeries.forEach(s => mainChart.removeSeries(s));
             maSeries = [];
@@ -223,7 +331,6 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
             }});
         }}
 
-        // ── 載入資料 ──
         function loadData(period) {{
             const d = allData[period];
             candles.setData(d.ohlcv);
@@ -233,17 +340,12 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
             }})));
             kLine.setData(d.k);
             dLine.setData(d.d);
-
-            // BUY 標記只在日線顯示
             if (period === 'D') {{
                 candles.setMarkers([{{ time:'{buy_js}', position:'belowBar', color:'#f8d210', shape:'arrowUp', text:'BUY' }}]);
             }} else {{
                 candles.setMarkers([]);
             }}
-
             applyMA();
-
-            // 日線預設顯示最近120根，週月線顯示全部
             const lastIdx = d.ohlcv.length - 1;
             if (period === 'D') {{
                 const range = {{ from: d.ohlcv[Math.max(0, lastIdx - 120)].time, to: d.ohlcv[lastIdx].time }};
@@ -255,7 +357,6 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
             }}
         }}
 
-        // ── 切換週期 ──
         function switchPeriod(period, btn) {{
             currentPeriod = period;
             document.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
@@ -263,7 +364,6 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
             loadData(period);
         }}
 
-        // ── 同步滾動 ──
         let isSyncingRange = false;
         mainChart.timeScale().subscribeVisibleTimeRangeChange(range => {{
             if (isSyncingRange) return;
@@ -278,7 +378,6 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
             isSyncingRange = false;
         }});
 
-        // ── 同步十字線 ──
         let isSyncingCrosshair = false;
         mainChart.subscribeCrosshairMove(p => {{
             if (isSyncingCrosshair || !p.time) return;
@@ -295,39 +394,40 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
             isSyncingCrosshair = false;
         }});
 
-        // ── 初始載入 ──
         loadData('D');
+        {inst_script}
     </script></body></html>
     """
 
 # ── 單支股票處理（供多執行緒呼叫）────────────────────────────
 def safe_float(val):
-    """安全地將 Series 或純數值轉為 float，避免 ambiguous truth value"""
     if isinstance(val, pd.Series):
         return float(val.iloc[0])
     return float(val)
 
 def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
-    """處理單支股票，回傳 result dict 或 None"""
     try:
-        df = yf.download(s, start=fetch_start, end=today, progress=False)
-        if len(df) < 240: return None
+        # 用 session 隔離避免多執行緒資料污染
+        import yfinance as _yf
+        df = _yf.download(s, start=fetch_start, end=today, progress=False, threads=False)
+        if df is None or df.empty or len(df) < 240: return None
+
+        # 處理 MultiIndex
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # 驗證股票代碼未被 yfinance redirect 到其他股票
-        expected_code = s.split('.')[0]
-        actual_ticker = df.columns.get_level_values(1)[0] if isinstance(df.columns, pd.MultiIndex) else None
-        if actual_ticker and actual_ticker != s:
-            return None
+        # 確認欄位存在
+        required = ['Open', 'High', 'Low', 'Close', 'Volume']
+        if not all(c in df.columns for c in required): return None
+        df = df[required].copy()
 
-        # 強制將所有欄位壓成一維 Series，防止多執行緒下 yfinance 回傳 MultiIndex 殘留
+        # 強制每個欄位都是一維
         for col in df.columns:
-            df[col] = df[col].squeeze()
+            df[col] = pd.to_numeric(df[col].squeeze(), errors='coerce')
 
-        close = pd.to_numeric(df['Close'], errors='coerce').dropna()
-        volume = pd.to_numeric(df['Volume'], errors='coerce').dropna()
-        df = df.loc[close.index]  # 對齊 index
+        close = df['Close'].dropna()
+        volume = df['Volume'].dropna()
+        df = df.loc[close.index]
         if len(close) < 240: return None
 
         ma60 = close.rolling(60).mean()
@@ -348,8 +448,8 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
         if not limit_dates: return None
 
         last_limit_date = limit_dates[-1]
-        limit_vol = safe_float(volume.loc[last_limit_date])   # 修正：避免 Series ambiguous
-        limit_low = safe_float(df.loc[last_limit_date, 'Low']) # 修正：避免 Series ambiguous
+        limit_vol = safe_float(volume.loc[last_limit_date])
+        limit_low = safe_float(df.loc[last_limit_date, 'Low'])
 
         curr_c = float(close.iloc[-1])
         curr_ma60 = float(ma60.iloc[-1])
@@ -359,7 +459,8 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
         win_kd = 9
         rsv = ((close - df['Low'].squeeze().rolling(win_kd).min()) /
                (df['High'].squeeze().rolling(win_kd).max() - df['Low'].squeeze().rolling(win_kd).min()) * 100).fillna(50)
-        k = rsv.ewm(com=2).mean(); d = k.ewm(com=2).mean()
+        k = rsv.ewm(com=2).mean()
+        d = k.ewm(com=2).mean()
 
         win_rate = 45
         if float(ma60.iloc[-1]) > float(ma60.iloc[-5]): win_rate += 10
@@ -375,7 +476,20 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
         t1, t2, t3 = p_max_90 + diff*0.382, p_max_90 + diff*0.618, p_max_90 + diff*1.0
 
         code = s.split('.')[0]
-        chart_html = generate_stock_chart(s, name_map.get(code, code), df, limit_dates, close.index[-1], ma60, ma240, k, d)
+
+        # 抓三大法人（只對上市股票，上櫃暫不支援）
+        inst_data = []
+        if s.endswith('.TW'):
+            try:
+                inst_data = fetch_institutional_daily(code, INSTITUTIONAL_MONTHS)
+            except:
+                inst_data = []
+
+        chart_html = generate_stock_chart(
+            s, name_map.get(code, code), df, limit_dates,
+            close.index[-1], ma60, ma240, k, d,
+            institutional_data=inst_data
+        )
         with open(f"{output_dir}/{code}.html", "w", encoding="utf-8") as f:
             f.write(chart_html)
 
@@ -400,7 +514,6 @@ def scan(today_str, output_dir="charts"):
     fetch_start = today - timedelta(days=3650)
     results = []
 
-    # 大盤過濾
     try:
         twii_raw = yf.download("^TWII", start=today-timedelta(days=500), end=today, progress=False)
         if isinstance(twii_raw.columns, pd.MultiIndex):
@@ -410,7 +523,6 @@ def scan(today_str, output_dir="charts"):
         print(f"[警告] 大盤資料抓取失敗: {e}")
         twii_bull = True
 
-    # 多執行緒掃描
     print(f"[掃描] 開始，共 {len(stocks)} 支，使用 {MAX_WORKERS} 執行緒...")
     completed = 0
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -426,14 +538,10 @@ def scan(today_str, output_dir="charts"):
     df_res = pd.DataFrame(results).sort_values(["win", "vol_r", "dist"], ascending=[False, True, True]) if results else pd.DataFrame()
     return df_res.drop(columns=["win", "vol_r", "dist"]) if not df_res.empty else df_res
 
-# ── 歷史導覽列產生 ────────────────────────────────────────────
+# ── 歷史導覽列 ────────────────────────────────────────────────
 def build_history_nav(today_str):
-    """掃描 history/ 資料夾，產生所有歷史日期的導覽連結"""
     os.makedirs("history", exist_ok=True)
-    dates = sorted([
-        f.replace(".html", "") for f in os.listdir("history") if f.endswith(".html")
-    ], reverse=True)
-    
+    dates = sorted([f.replace(".html", "") for f in os.listdir("history") if f.endswith(".html")], reverse=True)
     link_list = []
     for d in dates:
         bold = "font-weight:bold;" if d == today_str else ""
@@ -443,13 +551,9 @@ def build_history_nav(today_str):
 
 # ── 輸出 HTML ─────────────────────────────────────────────────
 def to_html(df, today_str, is_history=False):
-    """產生 HTML，is_history=True 時為歷史快照（不含導覽列更新）"""
     t = (datetime.utcnow() + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M")
     nav = build_history_nav(today_str) if not is_history else ""
-    
-    # 歷史頁的圖表連結要指向對應日期的 charts 資料夾
     table_html = df.to_html(index=False, escape=False) if not df.empty else "<p>今日無符合條件標的</p>"
-
     html = f"""
     <!DOCTYPE html><html><head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1.0">
@@ -459,7 +563,8 @@ def to_html(df, today_str, is_history=False):
         .container {{ width:100%; overflow-x:auto; }}
         table{{ width:100%; border-collapse:collapse; background:#161b22; border-radius:8px; }}
         th,td{{ padding:10px; border:1px solid #30363d; text-align:center; min-width:80px; }}
-        th{{ background:#1c2128; color:#8b949e; font-size:12px; }} a{{ color:#58a6ff; text-decoration:none; font-weight:bold; }}
+        th{{ background:#1c2128; color:#8b949e; font-size:12px; }}
+        a{{ color:#58a6ff; text-decoration:none; font-weight:bold; }}
     </style>
     </head><body>
     <h1>🚀 D-Pattern 轉機偵測{"（" + today_str + "）" if is_history else ""}</h1>
@@ -470,11 +575,9 @@ def to_html(df, today_str, is_history=False):
     """
     return html
 
-# ── 自動清理超過 N 天的舊資料 ────────────────────────────────
+# ── 自動清理 ──────────────────────────────────────────────────
 def cleanup_old_data(today, keep_days=KEEP_DAYS):
     cutoff = today - timedelta(days=keep_days)
-    
-    # 清理 history/
     if os.path.exists("history"):
         for f in os.listdir("history"):
             if not f.endswith(".html"): continue
@@ -484,8 +587,6 @@ def cleanup_old_data(today, keep_days=KEEP_DAYS):
                     os.remove(f"history/{f}")
                     print(f"[清理] 刪除歷史頁面: history/{f}")
             except: continue
-
-    # 清理 charts/日期/
     if os.path.exists("charts"):
         for d in os.listdir("charts"):
             dir_path = f"charts/{d}"
@@ -503,14 +604,11 @@ if __name__ == "__main__":
     today_str = today.strftime("%Y-%m-%d")
     chart_dir = f"charts/{today_str}"
 
-    # 1. 掃描（圖表存到 charts/今天日期/）
     df = scan(today_str, output_dir=chart_dir)
 
-    # 2. 修正圖表連結為日期路徑
     if not df.empty:
         df["代碼"] = df["代碼"].str.replace("./charts/", f"./charts/{today_str}/", regex=False)
 
-    # 3. 存歷史快照
     os.makedirs("history", exist_ok=True)
     history_df = df.copy()
     if not history_df.empty:
@@ -519,11 +617,8 @@ if __name__ == "__main__":
         f.write(to_html(history_df, today_str, is_history=True))
     print(f"[歷史] 已儲存 history/{today_str}.html")
 
-    # 4. 更新主頁（含歷史導覽列）
     with open("index.html", "w", encoding="utf-8") as f:
         f.write(to_html(df, today_str, is_history=False))
 
-    # 5. 清理超過 30 天的舊資料
     cleanup_old_data(today, KEEP_DAYS)
-
     print("DONE.")
