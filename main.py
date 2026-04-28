@@ -228,7 +228,8 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
             "K": round(float(k.iloc[-1]), 1), "D": round(float(d.iloc[-1]), 1)
         }
     except Exception as e:
-        print(f"[錯誤] {s}: {e}")
+        import traceback
+        print(f"[錯誤] {s}: {e}\n{traceback.format_exc()}")
         return None
 
 # ── 掃描主函式 ───────────────────────────────────────────────
