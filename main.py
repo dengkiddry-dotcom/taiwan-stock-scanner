@@ -5,26 +5,17 @@ from datetime import datetime, timedelta
 import time
 import os
 import json
+import math
+import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ── 全域開關 ─────────────────────────────────────────────────
-RUN_BACKTEST = False   # True=開啟回測（慢）False=關閉（快）
-
-# ── 產業分類對照表 ───────────────────────────────────────────
-industry_map = {
-    "2330":"半導體","2303":"半導體","2454":"半導體","2379":"半導體","2337":"半導體",
-    "2344":"半導體","2408":"半導體","3443":"半導體","2385":"半導體","3034":"半導體",
-    "2317":"電子代工","2382":"電子代工","2354":"電子代工","2356":"電子代工","2353":"電子代工",
-    "3008":"PCB","2383":"PCB","6274":"PCB","4904":"PCB","3044":"PCB",
-    "2308":"網通伺服器","2327":"網通伺服器","3376":"網通伺服器","6669":"網通伺服器",
-    "2603":"航運","2609":"航運","2615":"航運","2610":"航運","2881":"金融","2882":"金融"
-}
-
-INDUSTRY_LEADERS = {
-    "半導體": "2330", "金融": "2882", "航運": "2603", "網通伺服器": "2308", "電子代工": "2317"
-}
+# ── 設定 ─────────────────────────────────────────────────────
+KEEP_DAYS = 30        # 保留幾天的歷史紀錄
+MAX_WORKERS = 5       # 多執行緒下載數量（避免被封鎖）
 
 # ── 核心工具函式 ──────────────────────────────────────────────
 def calc_limit_price(prev_close: float) -> float:
+    """計算台股漲停價，符合台股 Tick 規則"""
     raw = prev_close * 1.1
     if raw < 10: tick = 0.01
     elif raw < 50: tick = 0.05
@@ -32,147 +23,332 @@ def calc_limit_price(prev_close: float) -> float:
     elif raw < 500: tick = 0.5
     elif raw < 1000: tick = 1.0
     else: tick = 5.0
-    import math
-    return math.floor(raw / tick) * tick
+    return math.floor(raw / tick + 0.0001) * tick
 
 def fetch_name_map() -> dict:
+    """抓取台股名稱對照表"""
     name_map = {}
     try:
-        r = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", timeout=10)
+        r = requests.get("https://openapi.twse.com.tw/v1/exchange_report/STOCK_DAY_ALL", timeout=10)
         for item in r.json(): name_map[item["Code"]] = item["Name"]
         r2 = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", timeout=10)
         for item in r2.json(): name_map[item["SecuritiesCompanyCode"]] = item["CompanyName"]
-    except: pass
+    except Exception as e:
+        print(f"[系統] 名稱抓取失敗: {e}")
     return name_map
 
 def get_list(target=2000):
+    """獲取台股上市櫃清單"""
     res = []
     try:
-        r = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", timeout=15)
+        r = requests.get("https://openapi.twse.com.tw/v1/exchange_report/STOCK_DAY_ALL", timeout=15)
         res += [f"{i['Code']}.TW" for i in r.json() if len(i['Code']) == 4]
         r2 = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", timeout=15)
         res += [f"{i['SecuritiesCompanyCode']}.TWO" for i in r2.json() if len(i['SecuritiesCompanyCode']) == 4]
-    except: pass
+    except Exception as e:
+        print(f"[系統] 清單抓取失敗: {e}")
     return res[:target]
 
-# ── 掃描主函式 (修正版：葛蘭碧轉機模式) ───────────────────────
-def scan(output_dir="charts", base_url="charts"):
+# ── HTML 圖表產生器 ───────────────────────────────────────────
+def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, ma240_series, k_series, d_series):
+    """產生包含獨立分區 KD 副圖的 HTML，解決十字線無限迴圈問題"""
+    code = symbol.split('.')[0]
+    
+    chart_data = []
+    for idx, row in df.iterrows():
+        chart_data.append({
+            "time": idx.strftime('%Y-%m-%d'),
+            "open": float(row['Open']), "high": float(row['High']), "low": float(row['Low']), "close": float(row['Close']),
+            "value": float(row['Volume']), "isLimit": idx in limit_dates
+        })
+
+    def series_to_json(s):
+        return json.dumps([{"time": i.strftime('%Y-%m-%d'), "value": float(v)} for i, v in s.dropna().items()])
+
+    ma60_js = series_to_json(ma60_series)
+    ma240_js = series_to_json(ma240_series)
+    k_js = series_to_json(k_series)
+    d_js = series_to_json(d_series)
+    buy_js = buy_date.strftime('%Y-%m-%d')
+
+    return f"""
+    <!DOCTYPE html><html><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+    <title>{code} {name}</title>
+    <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        body{{ background:#0d1117; margin:0; font-family:sans-serif; color:#e6edf3; overflow:hidden; display:flex; flex-direction:column; height:100vh; }}
+        #header{{ padding:12px; border-bottom:1px solid #30363d; flex-shrink:0; }}
+        #main-chart{{ flex-grow:1; width:100%; }}
+        #kd-chart{{ height:150px; width:100%; border-top:1px solid #30363d; flex-shrink:0; }}
+    </style>
+    </head><body>
+    <div id="header"><strong>{code} {name}</strong> <span id="info"></span></div>
+    <div id="main-chart"></div>
+    <div id="kd-chart"></div>
+    <script>
+        const chartOptions = {{
+            layout:{{ backgroundColor:'#0d1117', textColor:'#d1d4dc' }},
+            grid:{{ vertLines:{{color:'#1f2937'}}, horzLines:{{color:'#1f2937'}} }},
+            rightPriceScale:{{ borderColor:'#30363d' }},
+            timeScale:{{ borderColor:'#30363d', visible: false }},
+            crosshair:{{ mode:0 }}
+        }};
+
+        const mainChart = LightweightCharts.createChart(document.getElementById('main-chart'), chartOptions);
+        const kdChart = LightweightCharts.createChart(document.getElementById('kd-chart'), {{ ...chartOptions, timeScale: {{ ...chartOptions.timeScale, visible: true }} }});
+
+        const candles = mainChart.addCandlestickSeries({{ upColor:'#ff5252', downColor:'#26a69a', borderUpColor:'#ff5252', borderDownColor:'#26a69a', wickUpColor:'#ff5252', wickDownColor:'#26a69a' }});
+        const vols = mainChart.addHistogramSeries({{ color:'#26a69a', priceFormat:{{type:'volume'}}, priceScaleId:'', scaleMargins:{{ top:0.8, bottom:0 }} }});
+        const kLine = kdChart.addLineSeries({{ color:'#10b981', lineWidth:1.5, title:'K' }});
+        const dLine = kdChart.addLineSeries({{ color:'#f97316', lineWidth:1.5, title:'D' }});
+
+        const data = {json.dumps(chart_data)};
+        candles.setData(data);
+        vols.setData(data.map(d=>({{ time:d.time, value:d.value, color:d.isLimit?'#eab308':(d.close>=d.open?'#ff525288':'#26a69a88') }})));
+        mainChart.addLineSeries({{color:'#10b981', lineWidth:1}}).setData({ma60_js});
+        mainChart.addLineSeries({{color:'#ef4444', lineWidth:1}}).setData({ma240_js});
+        candles.setMarkers([{{ time:'{buy_js}', position:'belowBar', color:'#f8d210', shape:'arrowUp', text:'BUY' }}]);
+        kLine.setData({k_js});
+        dLine.setData({d_js});
+
+        let isSyncingRange = false;
+        mainChart.timeScale().subscribeVisibleTimeRangeChange(range => {{
+            if (isSyncingRange) return;
+            isSyncingRange = true;
+            kdChart.timeScale().setVisibleRange(range);
+            isSyncingRange = false;
+        }});
+        kdChart.timeScale().subscribeVisibleTimeRangeChange(range => {{
+            if (isSyncingRange) return;
+            isSyncingRange = true;
+            mainChart.timeScale().setVisibleRange(range);
+            isSyncingRange = false;
+        }});
+
+        let isSyncingCrosshair = false;
+        mainChart.subscribeCrosshairMove(p => {{
+            if (isSyncingCrosshair || !p.time) return;
+            isSyncingCrosshair = true;
+            kdChart.setCrosshairPosition(p.price, p.time, kLine);
+            isSyncingCrosshair = false;
+            const d = data.find(i => i.time === p.time);
+            if (d) document.getElementById('info').innerHTML = ` | 開:${{d.open}} 高:${{d.high}} 低:${{d.low}} 收:${{d.close}}`;
+        }});
+        kdChart.subscribeCrosshairMove(p => {{
+            if (isSyncingCrosshair || !p.time) return;
+            isSyncingCrosshair = true;
+            mainChart.setCrosshairPosition(p.price, p.time, candles);
+            isSyncingCrosshair = false;
+        }});
+
+        const lastIdx = data.length - 1;
+        const range = {{ from: data[Math.max(0, lastIdx - 120)].time, to: data[lastIdx].time }};
+        mainChart.timeScale().setVisibleRange(range);
+        kdChart.timeScale().setVisibleRange(range);
+    </script></body></html>
+    """
+
+# ── 單支股票處理（供多執行緒呼叫）────────────────────────────
+def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
+    """處理單支股票，回傳 result dict 或 None"""
+    try:
+        df = yf.download(s, start=fetch_start, end=today, progress=False)
+        if len(df) < 240: return None
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+        close = df['Close'].astype(float)
+        volume = df['Volume'].astype(float)
+        ma60 = close.rolling(60).mean()
+        ma240 = close.rolling(240).mean()
+
+        recent_close = close.iloc[-90:]; recent_ma240 = ma240.iloc[-90:]
+        has_broken_ma240 = ((recent_close > recent_ma240) & (recent_close.shift(1) <= recent_ma240.shift(1))).any()
+        if not has_broken_ma240: return None
+
+        p_min_90 = recent_close.min(); p_max_90 = recent_close.max()
+        wave_gain = (p_max_90 - p_min_90) / p_min_90
+        if wave_gain < 0.30: return None
+
+        limit_dates = [close.index[j] for j in range(len(close)-30, len(close))
+                       if j > 0 and close.iloc[j] >= (calc_limit_price(close.iloc[j-1]) - 0.01)]
+        if not limit_dates: return None
+
+        last_limit_date = limit_dates[-1]
+        limit_vol = volume.loc[last_limit_date]
+        limit_low = df.loc[last_limit_date, 'Low']
+
+        curr_c = close.iloc[-1]; curr_ma60 = ma60.iloc[-1]
+        dist_ma60 = (curr_c - curr_ma60) / curr_ma60
+        if abs(dist_ma60) > 0.025: return None
+
+        win_kd = 9
+        rsv = ((close - df['Low'].rolling(win_kd).min()) /
+               (df['High'].rolling(win_kd).max() - df['Low'].rolling(win_kd).min()) * 100).fillna(50)
+        k = rsv.ewm(com=2).mean(); d = k.ewm(com=2).mean()
+
+        win_rate = 45
+        if ma60.iloc[-1] > ma60.iloc[-5]: win_rate += 10
+        else: win_rate -= 15
+        if volume.iloc[-1] < limit_vol * 0.4: win_rate += 10
+        if k.iloc[-1] > d.iloc[-1] and k.iloc[-2] <= d.iloc[-2]: win_rate += 5
+        days_since = (today - last_limit_date).days
+        if 10 <= days_since <= 30: win_rate += 5
+        if twii_bull: win_rate += 5
+        win_rate = max(10, min(win_rate, 75))
+
+        diff = p_max_90 - p_min_90
+        t1, t2, t3 = p_max_90 + diff*0.382, p_max_90 + diff*0.618, p_max_90 + diff*1.0
+
+        code = s.split('.')[0]
+        chart_html = generate_stock_chart(s, name_map.get(code, code), df, limit_dates, close.index[-1], ma60, ma240, k, d)
+        with open(f"{output_dir}/{code}.html", "w", encoding="utf-8") as f:
+            f.write(chart_html)
+
+        return {
+            "win": win_rate, "vol_r": float(volume.iloc[-1]/limit_vol), "dist": abs(dist_ma60),
+            "代碼": f"<a href='./charts/{code}.html' target='_blank'>{code} 📊</a>",
+            "名稱": name_map.get(code, code), "勝率": f"{win_rate}%", "進場價": round(float(curr_c), 2),
+            "停損價": round(float(limit_low), 2), "目標1": round(t1, 2), "目標2": round(t2, 2), "目標3": round(t3, 2),
+            "K": round(float(k.iloc[-1]), 1), "D": round(float(d.iloc[-1]), 1)
+        }
+    except Exception as e:
+        print(f"[錯誤] {s}: {e}")
+        return None
+
+# ── 掃描主函式 ───────────────────────────────────────────────
+def scan(today_str, output_dir="charts"):
     os.makedirs(output_dir, exist_ok=True)
     name_map = fetch_name_map()
     stocks = get_list()
     today = datetime.now()
     fetch_start = today - timedelta(days=500)
     results = []
-    total = len(stocks)
 
-    print(f"[掃描] 啟動達邁/泰碩模式，目標：突破年線後回測季線標的")
+    # 大盤過濾
+    try:
+        twii_raw = yf.download("^TWII", start=today-timedelta(days=500), end=today, progress=False)
+        if isinstance(twii_raw.columns, pd.MultiIndex):
+            twii_raw.columns = twii_raw.columns.get_level_values(0)
+        twii_bull = float(twii_raw['Close'].iloc[-1]) > float(twii_raw['Close'].rolling(240).mean().iloc[-1])
+    except Exception as e:
+        print(f"[警告] 大盤資料抓取失敗: {e}")
+        twii_bull = True
 
-    for i, s in enumerate(stocks):
-        try:
-            if i % 25 == 0: print(f"[進度] {i}/{total}..."); time.sleep(1)
-            
-            df = yf.download(s, start=fetch_start, end=today, progress=False)
-            if df.empty or len(df) < 240: continue
-            if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+    # 多執行緒掃描
+    print(f"[掃描] 開始，共 {len(stocks)} 支，使用 {MAX_WORKERS} 執行緒...")
+    completed = 0
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(process_stock, s, fetch_start, today, name_map, twii_bull, output_dir): s for s in stocks}
+        for future in as_completed(futures):
+            completed += 1
+            if completed % 100 == 0:
+                print(f"[進度] {completed}/{len(stocks)}...")
+            result = future.result()
+            if result:
+                results.append(result)
 
-            close = df['Close'].squeeze().astype(float)
-            volume = df['Volume'].squeeze().astype(float)
-            high = df['High'].squeeze().astype(float)
-            low = df['Low'].squeeze().astype(float)
+    df_res = pd.DataFrame(results).sort_values(["win", "vol_r", "dist"], ascending=[False, True, True]) if results else pd.DataFrame()
+    return df_res.drop(columns=["win", "vol_r", "dist"]) if not df_res.empty else df_res
 
-            # 1. 均線與位置計算
-            ma60 = close.rolling(60).mean().iloc[-1]
-            ma240 = close.rolling(240).mean().iloc[-1]
-            curr_price = float(close.iloc[-1])
-            today_vol = float(volume.iloc[-1])
+# ── 歷史導覽列產生 ────────────────────────────────────────────
+def build_history_nav(today_str):
+    """掃描 history/ 資料夾，產生所有歷史日期的導覽連結"""
+    os.makedirs("history", exist_ok=True)
+    dates = sorted([
+        f.replace(".html", "") for f in os.listdir("history") if f.endswith(".html")
+    ], reverse=True)
+    
+    links = " | ".join([
+        f"<a href='./history/{d}.html' style='color:#58a6ff;text-decoration:none;{\"font-weight:bold;\" if d == today_str else \"\"}'>{d}</a>"
+        for d in dates
+    ])
+    return f"<div style='margin-bottom:16px;font-size:13px;color:#8b949e;'>📅 歷史紀錄：{links}</div>" if links else ""
 
-            # 2. 條件：90天內曾突破年線 (葛蘭碧法則核心)
-            has_broken_ma240 = any(close.iloc[-90:] > close.rolling(240).mean().iloc[-90:])
-            if not has_broken_ma240: continue
+# ── 輸出 HTML ─────────────────────────────────────────────────
+def to_html(df, today_str, is_history=False):
+    """產生 HTML，is_history=True 時為歷史快照（不含導覽列更新）"""
+    t = (datetime.utcnow() + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M")
+    nav = build_history_nav(today_str) if not is_history else ""
+    
+    # 歷史頁的圖表連結要指向對應日期的 charts 資料夾
+    table_html = df.to_html(index=False, escape=False) if not df.empty else "<p>今日無符合條件標的</p>"
 
-            # 3. 條件：第一波表態強度 (90天波段漲幅 > 30%)
-            p_min = float(df.iloc[-90:]['Low'].min())
-            p_max = float(df.iloc[-90:]['High'].max())
-            wave_gain = (p_max - p_min) / p_min
-            if wave_gain < 0.30: continue
+    html = f"""
+    <!DOCTYPE html><html><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1.0">
+    <title>D-Pattern 選股{"（" + today_str + "）" if is_history else ""}</title>
+    <style>
+        body{{ background:#0d1117; color:#e6edf3; font-family:sans-serif; padding:16px; }}
+        .container {{ width:100%; overflow-x:auto; }}
+        table{{ width:100%; border-collapse:collapse; background:#161b22; border-radius:8px; }}
+        th,td{{ padding:10px; border:1px solid #30363d; text-align:center; min-width:80px; }}
+        th{{ background:#1c2128; color:#8b949e; font-size:12px; }} a{{ color:#58a6ff; text-decoration:none; font-weight:bold; }}
+    </style>
+    </head><body>
+    <h1>🚀 D-Pattern 轉機偵測{"（" + today_str + "）" if is_history else ""}</h1>
+    <p>更新：{t} (台北)</p>
+    {nav}
+    <div class="container">{table_html}</div>
+    </body></html>
+    """
+    return html
 
-            # 4. 條件：30個交易日內曾有漲停 (主力簽名)
-            limit_dates = []
-            for j in range(len(close)-30, len(close)):
-                if j <= 0: continue
-                if float(close.iloc[j]) >= calc_limit_price(float(close.iloc[j-1])) * 0.999:
-                    limit_dates.append(close.index[j])
-            if not limit_dates: continue
-            
-            last_limit_date = limit_dates[-1]
-            limit_vol = float(volume.loc[last_limit_date])
-            limit_low = float(df.loc[last_limit_date, 'Low'])
-
-            # 5. 條件：目前回測季線 (葛蘭碧買點二/三)
-            dist_to_ma60 = (curr_price - ma60) / ma60
-            if abs(dist_to_ma60) > 0.025: continue
-
-            # ── 符合條件，開始評分 ──
-            score = 120 
-            notes = [f"🔥 達邁起飛型：第一波大漲 {wave_gain*100:.0f}% 且突破年線"]
-            notes.append(f"🎯 買點：回測季線支撐 (距離 {dist_to_ma60*100:.1f}%)")
-
-            # A. 窒息量加分 (成交量 < 漲停量 40%)
-            if today_vol < limit_vol * 0.4:
-                score += 50
-                notes.append("✅ 窒息量：量縮極致，賣壓竭盡")
-
-            # B. KD 加分 (低檔金叉)
+# ── 自動清理超過 N 天的舊資料 ────────────────────────────────
+def cleanup_old_data(today, keep_days=KEEP_DAYS):
+    cutoff = today - timedelta(days=keep_days)
+    
+    # 清理 history/
+    if os.path.exists("history"):
+        for f in os.listdir("history"):
+            if not f.endswith(".html"): continue
             try:
-                # 簡單 KD 邏輯
-                win = 9
-                low_min = low.rolling(win).min(); high_max = high.rolling(win).max()
-                rsv = (close - low_min) / (high_max - low_min) * 100
-                k = rsv.ewm(com=2).mean(); d = k.ewm(com=2).mean()
-                if k.iloc[-1] < 50 and k.iloc[-2] <= d.iloc[-2] and k.iloc[-1] > d.iloc[-1]:
-                    score += 30
-                    notes.append("✅ KD 共振：低檔黃金交叉")
-            except: pass
+                date = datetime.strptime(f.replace(".html", ""), "%Y-%m-%d")
+                if date < cutoff:
+                    os.remove(f"history/{f}")
+                    print(f"[清理] 刪除歷史頁面: history/{f}")
+            except: continue
 
-            code = s.split('.')[0]
-            name = name_map.get(code, code)
-            
-            results.append({
-                "_score": score,
-                "代碼": f"<a href='./charts/{code}.html' target='_blank'>{code} 📊</a>",
-                "名稱": name,
-                "操作": "✅ 可掛單" if score >= 150 else "👀 觀察",
-                "型態評分": f"{score} 分",
-                "收盤價": round(curr_price, 2),
-                "執行備註": "｜".join(notes),
-                "積極停損": round(ma60 * 0.97, 2),
-                "整理(日)": len(range(list(close.index).index(last_limit_date)+1, len(close)))
-            })
+    # 清理 charts/日期/
+    if os.path.exists("charts"):
+        for d in os.listdir("charts"):
+            dir_path = f"charts/{d}"
+            if not os.path.isdir(dir_path): continue
+            try:
+                date = datetime.strptime(d, "%Y-%m-%d")
+                if date < cutoff:
+                    shutil.rmtree(dir_path)
+                    print(f"[清理] 刪除舊圖表資料夾: {dir_path}")
+            except: continue
 
-            # 生成簡易 K 線圖 (沿用你的原本 generate_chart_html 結構)
-            # 這裡省略細節，確保你的圖表函式存在
-        except: continue
-
-    df_out = pd.DataFrame(results).sort_values("_score", ascending=False)
-    return df_out.drop(columns=["_score"]), {}
-
-def to_html(df, output_file="index.html", market_status=None):
-    t = (datetime.utcnow() + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
-    html = f"""<html><head><meta charset="utf-8"><style>
-    body{{background:#0d1117;color:#e6edf3;font-family:sans-serif;padding:20px;}}
-    table{{width:100%;border-collapse:collapse;margin-top:20px;}}
-    th,td{{padding:12px;border:1px solid #30363d;text-align:center;}}
-    th{{background:#161b22;}}
-    a{{color:#58a6ff;text-decoration:none;font-weight:bold;}}
-    .tag{{background:#238636;padding:4px 8px;border-radius:4px;}}
-    </style></head><body>
-    <h1>🚀 達邁/泰碩模式：葛蘭碧轉機偵測系統</h1>
-    <p>台北時間：{t} ｜ 核心：突破年線 + 回測季線 + 窒息量</p>
-    {df.to_html(index=False, escape=False) if not df.empty else "目前無符合標的"}
-    </body></html>"""
-    with open(output_file, "w", encoding="utf-8") as f: f.write(html)
-
+# ── 主程式 ────────────────────────────────────────────────────
 if __name__ == "__main__":
-    df, status = scan()
-    to_html(df)
-    print("[完成] 報表已更新。")
+    today = datetime.now()
+    today_str = today.strftime("%Y-%m-%d")
+    chart_dir = f"charts/{today_str}"
+
+    # 1. 掃描（圖表存到 charts/今天日期/）
+    df = scan(today_str, output_dir=chart_dir)
+
+    # 2. 修正圖表連結為日期路徑
+    if not df.empty:
+        df["代碼"] = df["代碼"].str.replace("./charts/", f"./charts/{today_str}/", regex=False)
+
+    # 3. 存歷史快照
+    os.makedirs("history", exist_ok=True)
+    history_df = df.copy()
+    if not history_df.empty:
+        history_df["代碼"] = history_df["代碼"].str.replace(f"./charts/{today_str}/", f"../charts/{today_str}/", regex=False)
+    with open(f"history/{today_str}.html", "w", encoding="utf-8") as f:
+        f.write(to_html(history_df, today_str, is_history=True))
+    print(f"[歷史] 已儲存 history/{today_str}.html")
+
+    # 4. 更新主頁（含歷史導覽列）
+    with open("index.html", "w", encoding="utf-8") as f:
+        f.write(to_html(df, today_str, is_history=False))
+
+    # 5. 清理超過 30 天的舊資料
+    cleanup_old_data(today, KEEP_DAYS)
+
+    print("DONE.")
