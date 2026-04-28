@@ -180,7 +180,7 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
             rightPriceScale:{{ borderColor:'#30363d' }},
             timeScale:{{ borderColor:'#30363d', visible:false, barSpacing:8, minBarSpacing:8, fixLeftEdge:true, fixRightEdge:true }},
             crosshair:{{ mode:1 }},
-            handleScale:{{ axisPressedMouseMove:false, mouseWheel:false, pinch:true }},
+            handleScale:{{ axisPressedMouseMove:false, mouseWheel:true, pinch:true }},
             handleScroll:{{ mouseWheel:false, pressedMouseMove:true, horzTouchDrag:true, vertTouchDrag:false }}
         }};
 
