@@ -260,10 +260,11 @@ def build_history_nav(today_str):
         f.replace(".html", "") for f in os.listdir("history") if f.endswith(".html")
     ], reverse=True)
     
-    links = " | ".join([
-        f"<a href='./history/{d}.html' style='color:#58a6ff;text-decoration:none;{\"font-weight:bold;\" if d == today_str else \"\"}'>{d}</a>"
-        for d in dates
-    ])
+    link_list = []
+    for d in dates:
+        bold = "font-weight:bold;" if d == today_str else ""
+        link_list.append(f"<a href='./history/{d}.html' style='color:#58a6ff;text-decoration:none;{bold}'>{d}</a>")
+    links = " | ".join(link_list)
     return f"<div style='margin-bottom:16px;font-size:13px;color:#8b949e;'>📅 歷史紀錄：{links}</div>" if links else ""
 
 # ── 輸出 HTML ─────────────────────────────────────────────────
