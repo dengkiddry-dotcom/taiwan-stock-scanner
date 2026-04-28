@@ -261,16 +261,16 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
         }}
 
         let isSyncingRange = false;
-        mainChart.timeScale().subscribeVisibleTimeRangeChange(range => {{
-            if (isSyncingRange) return;
+        mainChart.timeScale().subscribeVisibleLogicalRangeChange(range => {{
+            if (isSyncingRange || !range) return;
             isSyncingRange = true;
-            kdChart.timeScale().setVisibleRange(range);
+            kdChart.timeScale().setVisibleLogicalRange(range);
             isSyncingRange = false;
         }});
-        kdChart.timeScale().subscribeVisibleTimeRangeChange(range => {{
-            if (isSyncingRange) return;
+        kdChart.timeScale().subscribeVisibleLogicalRangeChange(range => {{
+            if (isSyncingRange || !range) return;
             isSyncingRange = true;
-            mainChart.timeScale().setVisibleRange(range);
+            mainChart.timeScale().setVisibleLogicalRange(range);
             isSyncingRange = false;
         }});
 
