@@ -403,21 +403,115 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
         k = rsv.ewm(com=2).mean()
         d = k.ewm(com=2).mean()
 
-        win_rate = 45
-        if float(ma60.iloc[-1]) > float(ma60.iloc[-5]): win_rate += 10
-        else: win_rate -= 15
-        if float(volume.iloc[-1]) < limit_vol * 0.4: win_rate += 10
-        if float(k.iloc[-1]) > float(d.iloc[-1]) and float(k.iloc[-2]) <= float(d.iloc[-2]): win_rate += 5
-        days_since = (today - last_limit_date).days
-        if 10 <= days_since <= 30: win_rate += 5
-        if twii_bull: win_rate += 5
-        win_rate = max(10, min(win_rate, 75))
+        reasons = []  # 選股理由
 
+        # ── 硬性過濾（不符合直接排除）──────────────────────────
+        # 1. 型態破壞：收盤跌破漲停日低點 97%
+        if curr_c < limit_low * 0.97:
+            return None
+
+        # 2. 整理天數：漲停後必須在 5～25 天內
+        days_since = (today - last_limit_date).days
+        if not (5 <= days_since <= 25):
+            return None
+
+        # 3. 位階過高：股價超過年線 180% 直接排除
+        curr_ma240 = float(ma240.iloc[-1])
+        price_ma240_ratio = curr_c / curr_ma240
+        if price_ma240_ratio > 1.8:
+            return None
+
+        # ── 勝率評分 ──────────────────────────────────────────
+        win_rate = 45
+
+        # A. 季線方向
+        if float(ma60.iloc[-1]) > float(ma60.iloc[-5]):
+            win_rate += 10
+            reasons.append("✅ 季線向上")
+        else:
+            win_rate -= 15
+            reasons.append("⚠️ 季線走平或向下")
+
+        # B. 成交量：近3日均量 vs 漲停爆量
+        pullback_vol_ratio = float(volume.iloc[-3:].mean()) / limit_vol
+        if pullback_vol_ratio < 0.35:
+            win_rate += 15
+            reasons.append(f"✅ 窒息量縮（近3日均量僅漲停量{pullback_vol_ratio*100:.0f}%）")
+        elif pullback_vol_ratio < 0.5:
+            win_rate += 8
+            reasons.append(f"✅ 量縮洗盤（近3日均量{pullback_vol_ratio*100:.0f}%）")
+        else:
+            win_rate -= 10
+            reasons.append(f"⚠️ 量未明顯縮（近3日均量{pullback_vol_ratio*100:.0f}%）")
+
+        # C. 位階
+        if price_ma240_ratio > 1.4:
+            win_rate -= 10
+            reasons.append(f"⚠️ 位階偏高（股價為年線{price_ma240_ratio*100:.0f}%）")
+        elif 1.05 <= price_ma240_ratio <= 1.35:
+            win_rate += 10
+            reasons.append(f"✅ 位階理想（股價為年線{price_ma240_ratio*100:.0f}%）")
+        else:
+            reasons.append(f"📍 位階：股價為年線{price_ma240_ratio*100:.0f}%")
+
+        # D. KD 金叉
+        if float(k.iloc[-1]) > float(d.iloc[-1]) and float(k.iloc[-2]) <= float(d.iloc[-2]):
+            win_rate += 10
+            reasons.append("✅ KD 低檔金叉")
+        elif float(k.iloc[-1]) > float(d.iloc[-1]):
+            win_rate += 5
+            reasons.append("📍 KD K>D 上行中")
+
+        # E. 整理天數最佳區間
+        if 7 <= days_since <= 15:
+            win_rate += 10
+            reasons.append(f"✅ 整理天數理想（{days_since}天）")
+        else:
+            reasons.append(f"📍 整理天數：{days_since}天")
+
+        # F. 大盤位置分段
+        twii_close_val, twii_ma20_val, twii_ma60_val, twii_ma240_val = twii_bull
+        if twii_close_val > twii_ma20_val:
+            win_rate += 15
+            reasons.append("✅ 大盤強勢（站上20MA）")
+        elif twii_close_val > twii_ma60_val:
+            win_rate += 5
+            reasons.append("📍 大盤中性（站上60MA）")
+        elif twii_close_val < twii_ma240_val:
+            win_rate -= 20
+            reasons.append("⚠️ 大盤弱勢（跌破年線）")
+        else:
+            reasons.append("📍 大盤整理中")
+
+        # G. 第一波強度
+        if wave_gain >= 0.5:
+            win_rate += 10
+            reasons.append(f"✅ 第一波強勁（漲幅{wave_gain*100:.0f}%）")
+        else:
+            reasons.append(f"📍 第一波漲幅{wave_gain*100:.0f}%")
+
+        win_rate = max(10, min(win_rate, 90))
+
+        # ── 目標價（黃金切割）──────────────────────────────────
         diff = p_max_90 - p_min_90
-        t1, t2, t3 = p_max_90 + diff*0.382, p_max_90 + diff*0.618, p_max_90 + diff*1.0
+        t1 = round(p_max_90 + diff*0.382, 2)
+        t2 = round(p_max_90 + diff*0.618, 2)
+        t3 = round(p_max_90 + diff*1.0, 2)
+
+        # ── 觸發價（突破近期高點）──────────────────────────────
+        recent_high = float(df['High'].iloc[-20:].max())
+        trigger_price = round(recent_high * 1.01, 2)
+
+        # ── 支撐群掛單區間 ──────────────────────────────────────
+        limit_open = safe_float(df.loc[last_limit_date, 'Open'])
+        recent_low_support = float(df['Low'].iloc[-20:].min())
+        support_candidates = [curr_ma60, limit_open, limit_low, recent_low_support]
+        valid_supports = [x for x in support_candidates if x < curr_c and x > 0]
+        support_price = max(valid_supports) if valid_supports else curr_ma60
+        order_low  = round(support_price * 0.99, 2)
+        order_high = round(support_price * 1.01, 2)
 
         code = s.split('.')[0]
-
         chart_html = generate_stock_chart(
             s, name_map.get(code, code), df, limit_dates,
             close.index[-1], ma60, ma240, k, d
@@ -425,21 +519,23 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
         with open(f"{output_dir}/{code}.html", "w", encoding="utf-8") as f:
             f.write(chart_html)
 
-        # 掛單區間
-        order_low  = round(float(curr_ma60) * 0.985, 2)
-        order_high = round(float(curr_ma60) * 1.005, 2)
+        reason_str = "｜".join(reasons)
 
         return {
-            "win": win_rate, "vol_r": float(volume.iloc[-1]) / limit_vol, "dist": abs(dist_ma60),
+            "win": win_rate,
+            "vol_r": pullback_vol_ratio,
+            "dist": abs(dist_ma60),
             "代碼": f"<a href='./charts/{code}.html' target='_blank'>{code} 📊</a>",
             "名稱": name_map.get(code, code),
             "收盤價": round(curr_c, 2),
             "勝率": f"{win_rate}%",
-            "掛單下緣": order_low,
-            "掛單上緣": order_high,
+            "掛單區間": f"{order_low}～{order_high}",
+            "觸發價": trigger_price,
             "停損價": round(limit_low, 2),
-            "目標1": round(t1, 2), "目標2": round(t2, 2), "目標3": round(t3, 2),
-            "K": round(float(k.iloc[-1]), 1), "D": round(float(d.iloc[-1]), 1)
+            "目標①": t1, "目標②": t2, "目標③": t3,
+            "K": round(float(k.iloc[-1]), 1),
+            "D": round(float(d.iloc[-1]), 1),
+            "選股理由": reason_str
         }
     except Exception as e:
         import traceback
@@ -459,10 +555,17 @@ def scan(today_str, output_dir="charts"):
         twii_raw = yf.download("^TWII", start=today-timedelta(days=500), end=today, progress=False)
         if isinstance(twii_raw.columns, pd.MultiIndex):
             twii_raw.columns = twii_raw.columns.get_level_values(0)
-        twii_bull = float(twii_raw['Close'].iloc[-1]) > float(twii_raw['Close'].rolling(240).mean().iloc[-1])
+        twii_raw.columns = [c.capitalize() for c in twii_raw.columns]
+        twii_c = twii_raw['Close']
+        twii_bull = (
+            float(twii_c.iloc[-1]),
+            float(twii_c.rolling(20).mean().iloc[-1]),
+            float(twii_c.rolling(60).mean().iloc[-1]),
+            float(twii_c.rolling(240).mean().iloc[-1])
+        )
     except Exception as e:
         print(f"[警告] 大盤資料抓取失敗: {e}")
-        twii_bull = True
+        twii_bull = (0, 0, 0, 0)
 
     print(f"[掃描] 開始，共 {len(stocks)} 支，使用 {MAX_WORKERS} 執行緒...")
     completed = 0
@@ -529,6 +632,19 @@ def to_html(df, today_str, is_history=False):
             except:
                 stop_str = str(row.get("停損價", ""))
 
+            trigger = row.get("觸發價", "")
+            reason_html = ""
+            for r in str(row.get("選股理由","")).split("｜"):
+                r = r.strip()
+                if not r: continue
+                if r.startswith("✅"):
+                    c = "#26a69a"
+                elif r.startswith("⚠️"):
+                    c = "#ffa500"
+                else:
+                    c = "#666"
+                reason_html += f'<span style="color:{c};margin-right:6px;font-size:11px;">{r}</span>'
+
             rows_html += f"""
             <tr>
                 <td style="text-align:left;padding-left:10px;min-width:80px;">{row.get("代碼","")}</td>
@@ -537,19 +653,19 @@ def to_html(df, today_str, is_history=False):
                 <td style="min-width:65px;">
                     <span style="background:{win_bg};color:{win_color};font-weight:bold;padding:4px 8px;border-radius:4px;border:1px solid {win_color};font-size:13px;">{row.get("勝率","")}</span>
                 </td>
-                <td style="color:#ffd700;font-size:12px;min-width:110px;">
-                    <span style="color:#888;font-size:10px;">掛</span> {row.get("掛單下緣","")} <span style="color:#555;">～</span> {row.get("掛單上緣","")}
-                </td>
+                <td style="color:#ffd700;font-size:12px;min-width:110px;">{row.get("掛單區間","")}</td>
+                <td style="color:#ff9900;font-weight:bold;min-width:65px;">{trigger}</td>
                 <td style="color:#26a69a;min-width:100px;">{stop_str}</td>
-                <td style="color:#ff8c00;min-width:60px;">{row.get("目標1","")}</td>
-                <td style="color:#ff6060;min-width:60px;">{row.get("目標2","")}</td>
-                <td style="color:#ff3030;font-weight:bold;min-width:60px;">{row.get("目標3","")}</td>
+                <td style="color:#ff8c00;min-width:60px;">{row.get("目標①","")}</td>
+                <td style="color:#ff6060;min-width:60px;">{row.get("目標②","")}</td>
+                <td style="color:#ff3030;font-weight:bold;min-width:60px;">{row.get("目標③","")}</td>
                 <td style="min-width:90px;">
                     <span style="color:{kd_color};font-weight:bold;">{row.get("K","")}</span>
                     <span style="color:#555;">/</span>
                     <span style="color:{kd_color};">{row.get("D","")}</span>
                     <br><span style="color:{kd_color};font-size:10px;">{kd_tag}</span>
                 </td>
+                <td style="text-align:left;min-width:300px;line-height:1.8;">{reason_html}</td>
             </tr>"""
 
         table_html = f"""
@@ -560,12 +676,14 @@ def to_html(df, today_str, is_history=False):
                     <th>名稱</th>
                     <th>收盤價</th>
                     <th>勝率</th>
-                    <th>建議掛單區間</th>
+                    <th>掛單區間</th>
+                    <th>觸發價</th>
                     <th>停損價</th>
                     <th>目標①</th>
                     <th>目標②</th>
                     <th>目標③</th>
-                    <th>KD 狀態</th>
+                    <th>KD</th>
+                    <th>選股理由</th>
                 </tr>
             </thead>
             <tbody>{rows_html}</tbody>
