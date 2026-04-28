@@ -83,7 +83,7 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
         #kd-chart{{ height:150px; width:100%; border-top:1px solid #30363d; flex-shrink:0; }}
     </style>
     </head><body>
-    <div id="header"><strong>{code} {name}</strong> <span id="info"></span></div>
+    <div id="header"><a href="../index.html" style="color:#58a6ff;text-decoration:none;margin-right:12px;">← 返回</a><strong>{code} {name}</strong> <span id="info"></span></div>
     <div id="main-chart"></div>
     <div id="kd-chart"></div>
     <script>
@@ -92,7 +92,14 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
             grid:{{ vertLines:{{color:'#1f2937'}}, horzLines:{{color:'#1f2937'}} }},
             rightPriceScale:{{ borderColor:'#30363d' }},
             timeScale:{{ borderColor:'#30363d', visible: false }},
-            crosshair:{{ mode:0 }}
+            crosshair:{{ mode:0 }},
+            handleScale: false,
+            handleScroll: {{
+                mouseWheel: false,
+                pressedMouseMove: true,
+                horzTouchDrag: true,
+                vertTouchDrag: false
+            }}
         }};
 
         const mainChart = LightweightCharts.createChart(document.getElementById('main-chart'), chartOptions);
