@@ -101,7 +101,8 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
     monthly_data = df_to_ohlcv(df_m, [])
     monthly_k, monthly_d = calc_kd(df_m)
 
-    buy_js = buy_date.strftime('%Y-%m-%d')
+    # 漲停日期列表轉 JS
+    limit_dates_js = json.dumps([d.strftime('%Y-%m-%d') for d in limit_dates])
 
     # 如果日線資料是空的，回傳錯誤提示頁面
     if not daily_data:
@@ -243,6 +244,16 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
             }});
         }}
 
+        // 漲停日標記
+        const limitDates = {limit_dates_js};
+        const limitMarkers = limitDates.map(d => ({{
+            time: d,
+            position: 'aboveBar',
+            color: '#f8d210',
+            shape: 'arrowDown',
+            text: '🚀'
+        }}));
+
         function loadData(period) {{
             const d = allData[period];
             candles.setData(d.ohlcv);
@@ -253,7 +264,7 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
             kLine.setData(d.k);
             dLine.setData(d.d);
             if (period === 'D') {{
-                candles.setMarkers([{{ time:'{buy_js}', position:'belowBar', color:'#f8d210', shape:'arrowUp', text:'BUY' }}]);
+                candles.setMarkers(limitMarkers);
             }} else {{
                 candles.setMarkers([]);
             }}
