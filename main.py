@@ -70,12 +70,13 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
 
     def calc_kd(d):
         import pandas as pd
-        close = d['Close'].astype(float)
-        high = d['High'].astype(float)
-        low = d['Low'].astype(float)
+        close = pd.to_numeric(d['Close'].squeeze(), errors='coerce').dropna()
+        high = pd.to_numeric(d['High'].squeeze(), errors='coerce').reindex(close.index).fillna(close)
+        low = pd.to_numeric(d['Low'].squeeze(), errors='coerce').reindex(close.index).fillna(close)
         win = 9
-        rsv = ((close - low.rolling(win).min()) /
-               (high.rolling(win).max() - low.rolling(win).min()) * 100).fillna(50)
+        denom = high.rolling(win).max() - low.rolling(win).min()
+        denom = denom.replace(0, 1)  # 防止除以零
+        rsv = ((close - low.rolling(win).min()) / denom * 100).fillna(50)
         k = rsv.ewm(com=2).mean()
         dv = k.ewm(com=2).mean()
         return (
@@ -146,7 +147,7 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
             <button class="btn active" onclick="switchPeriod('D',this)">日線</button>
             <button class="btn" onclick="switchPeriod('W',this)">週線</button>
             <button class="btn" onclick="switchPeriod('M',this)">月線</button>
-            <input id="ma-input" type="text" value="60,240" placeholder="均線參數，例如 5,10,60,240">
+            <input id="ma-input" type="text" value="5,10,20,60,240" placeholder="均線參數，例如 5,10,20,60,240">
             <button class="btn" onclick="applyMA()">套用均線</button>
         </div>
     </div>
@@ -167,7 +168,7 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
             layout:{{ backgroundColor:'#0d1117', textColor:'#d1d4dc' }},
             grid:{{ vertLines:{{color:'#1f2937'}}, horzLines:{{color:'#1f2937'}} }},
             rightPriceScale:{{ borderColor:'#30363d' }},
-            timeScale:{{ borderColor:'#30363d', visible:false, barSpacing:8, minBarSpacing:8 }},
+            timeScale:{{ borderColor:'#30363d', visible:false, barSpacing:8, minBarSpacing:8, fixLeftEdge:true, fixRightEdge:true }},
             crosshair:{{ mode:1 }},
             handleScale:{{ axisPressedMouseMove:false, mouseWheel:false, pinch:true }},
             handleScroll:{{ mouseWheel:false, pressedMouseMove:true, horzTouchDrag:true, vertTouchDrag:false }}
@@ -176,7 +177,7 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
         const mainChart = LightweightCharts.createChart(document.getElementById('main-chart'), chartOptions);
         const kdChart = LightweightCharts.createChart(document.getElementById('kd-chart'), {{
             ...chartOptions,
-            timeScale:{{ ...chartOptions.timeScale, visible:true }}
+            timeScale:{{ ...chartOptions.timeScale, visible:true, fixLeftEdge:true, fixRightEdge:true }}
         }});
 
         const candles = mainChart.addCandlestickSeries({{
