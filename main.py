@@ -115,6 +115,20 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
         <p style="color:#8b949e;">無法取得此股票的 K 線資料，可能原因：yfinance 不支援此代碼，或資料尚未更新。</p>
         </body></html>"""
 
+    # 計算 MACD（週線用）
+    def calc_macd(d, fast=12, slow=26, signal=9):
+        close = pd.to_numeric(d['Close'].squeeze(), errors='coerce').dropna()
+        ema_fast = close.ewm(span=fast, adjust=False).mean()
+        ema_slow = close.ewm(span=slow, adjust=False).mean()
+        dif = ema_fast - ema_slow
+        macd = dif.ewm(span=signal, adjust=False).mean()
+        osc = dif - macd
+        def to_js(s):
+            return [{"time": i.strftime('%Y-%m-%d'), "value": round(float(v), 4)} for i, v in s.dropna().items()]
+        return to_js(dif), to_js(macd), to_js(osc)
+
+    weekly_dif, weekly_macd, weekly_osc = calc_macd(df_w)
+
     daily_js = json.dumps(daily_data)
     weekly_js = json.dumps(weekly_data)
     monthly_js = json.dumps(monthly_data)
@@ -124,6 +138,9 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
     weekly_d_js = json.dumps(weekly_d)
     monthly_k_js = json.dumps(monthly_k)
     monthly_d_js = json.dumps(monthly_d)
+    weekly_dif_js = json.dumps(weekly_dif)
+    weekly_macd_js = json.dumps(weekly_macd)
+    weekly_osc_js = json.dumps(weekly_osc)
 
 
 
@@ -135,8 +152,6 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
     <style>
         * {{ box-sizing:border-box; margin:0; padding:0; }}
         body {{ background:#0d0d0d; color:#e0e0e0; font-family:"Microsoft JhengHei","PingFang TC",sans-serif; display:flex; flex-direction:column; height:100vh; overflow:hidden; }}
-
-        /* ── 頂部 header ── */
         #header {{ background:#111; border-bottom:1px solid #222; flex-shrink:0; padding:4px 8px; }}
         #title-row {{ display:flex; align-items:center; gap:8px; margin-bottom:3px; }}
         #title-row a {{ color:#58a6ff; font-size:12px; text-decoration:none; }}
@@ -145,91 +160,53 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
         .btn {{ background:#1c1c1c; border:1px solid #333; color:#aaa; padding:3px 8px; border-radius:3px; cursor:pointer; font-size:12px; }}
         .btn.active {{ background:#c0392b; border-color:#c0392b; color:#fff; font-weight:bold; }}
         #ma-input {{ background:#1c1c1c; border:1px solid #333; color:#e0e0e0; padding:3px 6px; border-radius:3px; font-size:12px; width:130px; }}
-
-        /* ── 資訊列（三竹風格）── */
-        .info-bar {{
-            background:#111;
-            border-bottom:1px solid #1e1e1e;
-            padding:2px 8px;
-            font-size:11px;
-            display:flex;
-            flex-wrap:wrap;
-            gap:8px;
-            align-items:center;
-            flex-shrink:0;
-            min-height:18px;
-        }}
-        .info-label {{ color:#555; margin-right:2px; }}
-
-        /* ── 圖表區塊標題列 ── */
-        .chart-label {{
-            background:#0f0f0f;
-            border-top:1px solid #1e1e1e;
-            padding:2px 8px;
-            font-size:11px;
-            color:#555;
-            flex-shrink:0;
-            display:flex;
-            gap:10px;
-            align-items:center;
-        }}
-
-        /* ── 圖表 div ── */
+        .info-bar {{ background:#111; border-bottom:1px solid #1a1a1a; padding:2px 8px; font-size:11px; display:flex; flex-wrap:wrap; gap:6px; align-items:center; flex-shrink:0; min-height:18px; }}
+        .chart-label {{ background:#0f0f0f; border-top:1px solid #1a1a1a; padding:2px 8px; font-size:11px; color:#555; flex-shrink:0; display:flex; gap:8px; align-items:center; }}
+        .chart-label span.lbl {{ color:#555; }}
         #main-chart {{ flex:6; width:100%; min-height:0; }}
         #vol-chart  {{ flex:2; width:100%; min-height:0; }}
-        #kd-chart   {{ flex:2; width:100%; min-height:0; }}
+        #sub-chart  {{ flex:2; width:100%; min-height:0; }}
     </style>
     </head><body>
-
     <div id="header">
         <div id="title-row">
             <a href="../../index.html">← 返回</a>
             <strong>{code} {name}</strong>
         </div>
         <div id="controls">
-            <button class="btn active" onclick="switchPeriod('D',this)">日</button>
-            <button class="btn" onclick="switchPeriod('W',this)">週</button>
-            <button class="btn" onclick="switchPeriod('M',this)">月</button>
-            <input id="ma-input" type="text" value="5,10,20,60,240">
+            <button class="btn active" id="btn-D" onclick="switchPeriod('D',this)">日</button>
+            <button class="btn" id="btn-W" onclick="switchPeriod('W',this)">週</button>
+            <button class="btn" id="btn-M" onclick="switchPeriod('M',this)">月</button>
+            <input id="ma-input" type="text" value="5,10,20,60,120,240">
             <button class="btn" onclick="applyMA()">均線</button>
         </div>
     </div>
-
-    <!-- OHLC + MA 資訊列 -->
-    <div class="info-bar" id="ohlc-bar">
-        <span id="ohlc-info" style="color:#aaa;">← 滑動查看</span>
-    </div>
-    <div class="chart-label" id="ma-bar">
-        <span class="info-label">MA ▶</span>
-        <span id="ma-values"></span>
-    </div>
-
-    <!-- K線主圖 -->
+    <div class="info-bar"><span id="ohlc-info" style="color:#666;">← 滑動查看</span></div>
+    <div class="chart-label"><span class="lbl">MA ▶</span><span id="ma-values"></span></div>
     <div id="main-chart"></div>
-
-    <!-- 成交量 -->
-    <div class="chart-label" id="vol-bar">
-        <span class="info-label">VOL ▶</span>
-        <span id="vol-value"></span>
-    </div>
+    <div class="chart-label"><span class="lbl">VOL ▶</span><span id="vol-values"></span></div>
     <div id="vol-chart"></div>
-
-    <!-- KD -->
-    <div class="chart-label" id="kd-bar">
-        <span class="info-label">KD ▶</span>
-        <span id="kd-values"></span>
-    </div>
-    <div id="kd-chart"></div>
+    <div class="chart-label"><span class="lbl" id="sub-label">KD ▶</span><span id="sub-values"></span></div>
+    <div id="sub-chart"></div>
 
     <script>
+        // ── 資料 ──
         const allData = {{
-            D: {{ ohlcv: {daily_js}, k: {daily_k_js}, d: {daily_d_js} }},
-            W: {{ ohlcv: {weekly_js}, k: {weekly_k_js}, d: {weekly_d_js} }},
-            M: {{ ohlcv: {monthly_js}, k: {monthly_k_js}, d: {monthly_d_js} }}
+            D: {{ ohlcv:{daily_js},   k:{daily_k_js},    d:{daily_d_js},
+                  dif:null, macd:null, osc:null }},
+            W: {{ ohlcv:{weekly_js},  k:{weekly_k_js},   d:{weekly_d_js},
+                  dif:{weekly_dif_js}, macd:{weekly_macd_js}, osc:{weekly_osc_js} }},
+            M: {{ ohlcv:{monthly_js}, k:{monthly_k_js},  d:{monthly_d_js},
+                  dif:null, macd:null, osc:null }}
         }};
+
+        // 每個週期的預設均線
+        const defaultMA = {{ D:'5,10,20,60,120,240', W:'5,10,20', M:'5,60,120' }};
         let currentPeriod = 'D';
         const maColors = ['#f59e0b','#a78bfa','#34d399','#fb7185','#38bdf8','#f97316'];
+        const volMAColors = ['#f59e0b','#a78bfa'];
 
+        // ── 圖表基礎設定 ──
         const baseOpts = {{
             layout:{{ background:{{color:'#0d0d0d'}}, textColor:'#666' }},
             grid:{{ vertLines:{{color:'#1a1a1a'}}, horzLines:{{color:'#1a1a1a'}} }},
@@ -240,70 +217,140 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
             handleScroll:{{ mouseWheel:false, pressedMouseMove:true, horzTouchDrag:true, vertTouchDrag:false }}
         }};
 
-        // 三個獨立圖表
         const mainChart = LightweightCharts.createChart(document.getElementById('main-chart'), baseOpts);
-        const volChart  = LightweightCharts.createChart(document.getElementById('vol-chart'),  {{
-            ...baseOpts,
-            rightPriceScale:{{ ...baseOpts.rightPriceScale, scaleMargins:{{top:0.1,bottom:0.1}} }}
-        }});
-        const kdChart   = LightweightCharts.createChart(document.getElementById('kd-chart'), {{
-            ...baseOpts,
-            timeScale:{{ ...baseOpts.timeScale, visible:true }}
+        const volChart  = LightweightCharts.createChart(document.getElementById('vol-chart'),  baseOpts);
+        const subChart  = LightweightCharts.createChart(document.getElementById('sub-chart'),  {{
+            ...baseOpts, timeScale:{{ ...baseOpts.timeScale, visible:true }}
         }});
 
-        // 系列
+        // ── 主圖系列 ──
         const candles = mainChart.addCandlestickSeries({{
             upColor:'#d32f2f', downColor:'#00897b',
             borderUpColor:'#d32f2f', borderDownColor:'#00897b',
             wickUpColor:'#d32f2f', wickDownColor:'#00897b'
         }});
+
+        // ── 成交量系列 ──
         const volSeries = volChart.addHistogramSeries({{
-            priceFormat:{{type:'volume'}},
-            priceScaleId:'right'
+            priceFormat:{{type:'volume'}}, priceScaleId:'right'
         }});
-        const kLine = kdChart.addLineSeries({{ color:'#f59e0b', lineWidth:1.5, lastValueVisible:false, crosshairMarkerVisible:false }});
-        const dLine = kdChart.addLineSeries({{ color:'#a78bfa', lineWidth:1.5, lastValueVisible:false, crosshairMarkerVisible:false }});
+        let volMASeries = [];
 
-        // KD 50 參考線
-        kdChart.addLineSeries({{ color:'#333', lineWidth:1, lastValueVisible:false, crosshairMarkerVisible:false, priceLineVisible:false }})
-               .setData([]);
+        // ── 副圖系列（KD / MACD，動態建立）──
+        let subSeries = [];
 
+        // ── 均線系列 ──
         let maSeries = [];
         let maPeriodsCache = [];
 
+        // ── 工具函式 ──
         function calcMA(data, period) {{
-            const result = [];
-            for (let i = period - 1; i < data.length; i++) {{
-                const sum = data.slice(i-period+1, i+1).reduce((a,b) => a+b.close, 0);
-                result.push({{ time: data[i].time, value: parseFloat((sum/period).toFixed(2)) }});
+            const r = [];
+            for (let i = period-1; i < data.length; i++) {{
+                const sum = data.slice(i-period+1,i+1).reduce((a,b)=>a+b.close,0);
+                r.push({{ time:data[i].time, value:parseFloat((sum/period).toFixed(2)) }});
             }}
-            return result;
+            return r;
         }}
 
+        function calcVolMA(data, period) {{
+            const r = [];
+            for (let i = period-1; i < data.length; i++) {{
+                const sum = data.slice(i-period+1,i+1).reduce((a,b)=>a+b.value,0);
+                r.push({{ time:data[i].time, value:parseFloat((sum/period).toFixed(0)) }});
+            }}
+            return r;
+        }}
+
+        function fmtVol(v) {{
+            if (v >= 1e8) return (v/1e8).toFixed(1)+'億';
+            if (v >= 1e4) return (v/1e4).toFixed(0)+'萬';
+            return v;
+        }}
+
+        // ── 套用均線 ──
         function applyMA() {{
             maSeries.forEach(s => mainChart.removeSeries(s));
             maSeries = [];
             const data = allData[currentPeriod].ohlcv;
             const input = document.getElementById('ma-input').value;
-            maPeriodsCache = input.split(',').map(v => parseInt(v.trim())).filter(v => !isNaN(v) && v > 0);
-            const maValEl = document.getElementById('ma-values');
-            maValEl.innerHTML = '';
-            maPeriodsCache.forEach((p, i) => {{
+            maPeriodsCache = input.split(',').map(v=>parseInt(v.trim())).filter(v=>!isNaN(v)&&v>0);
+            const el = document.getElementById('ma-values');
+            el.innerHTML = '';
+            maPeriodsCache.forEach((p,i) => {{
                 const color = maColors[i % maColors.length];
                 const s = mainChart.addLineSeries({{
-                    color, lineWidth:1,
-                    priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false
+                    color, lineWidth:1, priceLineVisible:false,
+                    lastValueVisible:false, crosshairMarkerVisible:false
                 }});
                 const maData = calcMA(data, p);
                 s.setData(maData);
                 maSeries.push(s);
-                const lastVal = maData.length > 0 ? maData[maData.length-1].value : '-';
+                const last = maData.length>0 ? maData[maData.length-1].value : '-';
                 const span = document.createElement('span');
-                span.id = 'ma-lbl-' + p;
-                span.style.cssText = `color:${{color}};margin-right:8px;`;
-                span.innerHTML = `${{p}}T:<b>${{lastVal}}</b>`;
-                maValEl.appendChild(span);
+                span.id = 'ma-lbl-'+p;
+                span.style.cssText = `color:${{color}};margin-right:6px;`;
+                span.innerHTML = `${{p}}T:<b>${{last}}</b>`;
+                el.appendChild(span);
             }});
+        }}
+
+        // ── 套用成交量均線 ──
+        function applyVolMA(data) {{
+            volMASeries.forEach(s => volChart.removeSeries(s));
+            volMASeries = [];
+            const volData = data.map(x => ({{time:x.time, value:x.value}}));
+            [[5, volMAColors[0]], [10, volMAColors[1]]].forEach(([p, color]) => {{
+                const s = volChart.addLineSeries({{
+                    color, lineWidth:1, priceScaleId:'right',
+                    lastValueVisible:false, crosshairMarkerVisible:false, priceLineVisible:false
+                }});
+                s.setData(calcVolMA(volData, p));
+                volMASeries.push(s);
+            }});
+        }}
+
+        // ── 建立/切換副圖 ──
+        function buildSubChart(period) {{
+            subSeries.forEach(s => subChart.removeSeries(s));
+            subSeries = [];
+            const d = allData[period];
+
+            if (period === 'W') {{
+                // MACD
+                document.getElementById('sub-label').textContent = 'MACD ▶';
+                const difS  = subChart.addLineSeries({{ color:'#38bdf8', lineWidth:1.5, lastValueVisible:false, crosshairMarkerVisible:false }});
+                const macdS = subChart.addLineSeries({{ color:'#f97316', lineWidth:1.5, lastValueVisible:false, crosshairMarkerVisible:false }});
+                const oscS  = subChart.addHistogramSeries({{ lastValueVisible:false, crosshairMarkerVisible:false, priceScaleId:'right' }});
+                difS.setData(d.dif);
+                macdS.setData(d.macd);
+                oscS.setData(d.osc.map(x => ({{
+                    time:x.time, value:x.value,
+                    color: x.value >= 0 ? '#d32f2f99' : '#00897b99'
+                }})));
+                subSeries = [difS, macdS, oscS];
+                // 顯示最新值
+                const lastDif  = d.dif.length>0  ? d.dif[d.dif.length-1].value   : '-';
+                const lastMacd = d.macd.length>0 ? d.macd[d.macd.length-1].value : '-';
+                document.getElementById('sub-values').innerHTML =
+                    `<span style="color:#38bdf8">DIF<b>${{lastDif}}</b></span>` +
+                    ` <span style="color:#f97316">MACD<b>${{lastMacd}}</b></span>`;
+            }} else {{
+                // KD
+                document.getElementById('sub-label').textContent = 'KD ▶';
+                const kS = subChart.addLineSeries({{ color:'#f59e0b', lineWidth:1.5, lastValueVisible:false, crosshairMarkerVisible:false }});
+                const dS = subChart.addLineSeries({{ color:'#a78bfa', lineWidth:1.5, lastValueVisible:false, crosshairMarkerVisible:false }});
+                kS.setData(d.k);
+                dS.setData(d.d);
+                subSeries = [kS, dS];
+                const lastK = d.k.length>0 ? d.k[d.k.length-1].value : '-';
+                const lastD = d.d.length>0 ? d.d[d.d.length-1].value : '-';
+                const kdColor = parseFloat(lastK) > parseFloat(lastD) ? '#f59e0b' : '#a78bfa';
+                document.getElementById('sub-values').innerHTML =
+                    `<span style="color:#f59e0b">K<b>${{lastK}}</b></span>` +
+                    ` <span style="color:#a78bfa">D<b>${{lastD}}</b></span>` +
+                    ` <span style="color:${{kdColor}};font-size:10px;">${{parseFloat(lastK)>parseFloat(lastD)?'▲金叉':'▼死叉'}}</span>`;
+            }}
         }}
 
         // 漲停標記
@@ -312,23 +359,24 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
             time:d, position:'aboveBar', color:'#f8d210', shape:'arrowDown', text:'🚀'
         }}));
 
+        // ── 載入資料 ──
         function loadData(period) {{
             const d = allData[period];
             candles.setData(d.ohlcv);
             volSeries.setData(d.ohlcv.map(x => ({{
                 time:x.time, value:x.value,
-                color: x.isLimit ? '#eab308' : (x.close >= x.open ? '#d32f2f99' : '#00897b99')
+                color: x.isLimit ? '#eab308' : (x.close>=x.open ? '#d32f2f99' : '#00897b99')
             }})));
-            kLine.setData(d.k);
-            dLine.setData(d.d);
-            candles.setMarkers(period === 'D' ? limitMarkers : []);
+            applyVolMA(d.ohlcv);
+            candles.setMarkers(period==='D' ? limitMarkers : []);
+            buildSubChart(period);
             applyMA();
-            const lastIdx = d.ohlcv.length - 1;
-            if (period === 'D') {{
-                const range = {{ from: d.ohlcv[Math.max(0, lastIdx-120)].time, to: d.ohlcv[lastIdx].time }};
-                [mainChart, volChart, kdChart].forEach(c => c.timeScale().setVisibleRange(range));
+            const lastIdx = d.ohlcv.length-1;
+            if (period==='D') {{
+                const range = {{ from:d.ohlcv[Math.max(0,lastIdx-120)].time, to:d.ohlcv[lastIdx].time }};
+                [mainChart, volChart, subChart].forEach(c => c.timeScale().setVisibleRange(range));
             }} else {{
-                [mainChart, volChart, kdChart].forEach(c => c.timeScale().fitContent());
+                [mainChart, volChart, subChart].forEach(c => c.timeScale().fitContent());
             }}
         }}
 
@@ -336,73 +384,86 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
             currentPeriod = period;
             document.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
+            document.getElementById('ma-input').value = defaultMA[period];
             loadData(period);
         }}
 
         // ── 三圖同步滾動 ──
         let syncingRange = false;
-        function syncRange(src, targets) {{
+        [mainChart, volChart, subChart].forEach(src => {{
             src.timeScale().subscribeVisibleLogicalRangeChange(range => {{
                 if (syncingRange || !range) return;
                 syncingRange = true;
-                targets.forEach(c => c.timeScale().setVisibleLogicalRange(range));
+                [mainChart, volChart, subChart].filter(c => c !== src)
+                    .forEach(c => c.timeScale().setVisibleLogicalRange(range));
                 syncingRange = false;
             }});
-        }}
-        syncRange(mainChart, [volChart, kdChart]);
-        syncRange(volChart,  [mainChart, kdChart]);
-        syncRange(kdChart,   [mainChart, volChart]);
+        }});
 
         // ── 三圖同步十字線 ──
         let syncingCross = false;
-        function syncCross(src, targets, refSeries) {{
+        function bindCross(src, refMap) {{
             src.subscribeCrosshairMove(p => {{
                 if (syncingCross || !p.time) return;
                 syncingCross = true;
-                targets.forEach((c, i) => c.setCrosshairPosition(p.price, p.time, refSeries[i]));
+                refMap.forEach(({{chart, series}}) => chart.setCrosshairPosition(p.price, p.time, series));
                 syncingCross = false;
 
-                // 更新 OHLC
-                const d = allData[currentPeriod].ohlcv.find(x => x.time === p.time);
+                // OHLC 更新
+                const d = allData[currentPeriod].ohlcv.find(x => x.time===p.time);
                 if (d) {{
-                    const chg = d.close - d.open;
+                    const chg = d.close-d.open;
                     const chgPct = (chg/d.open*100).toFixed(2);
-                    const cc = chg >= 0 ? '#d32f2f' : '#00897b';
+                    const cc = chg>=0 ? '#d32f2f' : '#00897b';
                     document.getElementById('ohlc-info').innerHTML =
-                        `<span style="color:#666">${{p.time}}</span>` +
+                        `<span style="color:#555">${{p.time}}</span>` +
                         ` 開<b style="color:#ccc">${{d.open}}</b>` +
                         ` 高<b style="color:#d32f2f">${{d.high}}</b>` +
                         ` 低<b style="color:#00897b">${{d.low}}</b>` +
                         ` 收<b style="color:${{cc}}">${{d.close}}</b>` +
                         ` <span style="color:${{cc}}">${{chg>=0?'+':''}}${{chg.toFixed(2)}}(${{chg>=0?'+':''}}${{chgPct}}%)</span>`;
-                    // 成交量
-                    const volFmt = d.value >= 1e8 ? (d.value/1e8).toFixed(1)+'億' : d.value >= 1e4 ? (d.value/1e4).toFixed(0)+'萬' : d.value;
-                    document.getElementById('vol-value').innerHTML = `<span style="color:${{d.close>=d.open?'#d32f2f':'#00897b'}}">${{volFmt}}</span>`;
+                    // VOL 更新
+                    document.getElementById('vol-values').innerHTML =
+                        `<span style="color:${{d.close>=d.open?'#d32f2f':'#00897b'}}">${{fmtVol(d.value)}}</span>`;
                     // MA 更新
-                    maPeriodsCache.forEach((period, i) => {{
+                    maPeriodsCache.forEach(period => {{
                         const maData = calcMA(allData[currentPeriod].ohlcv, period);
-                        const found = maData.find(m => m.time === p.time);
-                        const el = document.getElementById('ma-lbl-' + period);
+                        const found = maData.find(m => m.time===p.time);
+                        const el = document.getElementById('ma-lbl-'+period);
                         if (el && found) el.innerHTML = `${{period}}T:<b>${{found.value}}</b>`;
                     }});
                 }}
 
-                // KD 更新
-                const kd = allData[currentPeriod];
-                const kf = kd.k.find(x => x.time === p.time);
-                const df2 = kd.d.find(x => x.time === p.time);
-                if (kf && df2) {{
-                    const kc = kf.value > df2.value ? '#f59e0b' : '#a78bfa';
-                    document.getElementById('kd-values').innerHTML =
-                        `<span style="color:#f59e0b">K<b>${{kf.value}}</b></span>` +
-                        ` <span style="color:#a78bfa">D<b>${{df2.value}}</b></span>` +
-                        ` <span style="color:${{kc}};font-size:10px;">${{kf.value>df2.value?'▲金叉':'▼死叉'}}</span>`;
+                // 副圖數值更新
+                const cur = allData[currentPeriod];
+                if (currentPeriod==='W' && cur.dif) {{
+                    const difF  = cur.dif.find(x=>x.time===p.time);
+                    const macdF = cur.macd.find(x=>x.time===p.time);
+                    const oscF  = cur.osc.find(x=>x.time===p.time);
+                    if (difF && macdF) {{
+                        const oscColor = oscF && oscF.value>=0 ? '#d32f2f' : '#00897b';
+                        document.getElementById('sub-values').innerHTML =
+                            `<span style="color:#38bdf8">DIF<b>${{difF.value}}</b></span>` +
+                            ` <span style="color:#f97316">MACD<b>${{macdF.value}}</b></span>` +
+                            (oscF ? ` <span style="color:${{oscColor}}">OSC<b>${{oscF.value}}</b></span>` : '');
+                    }}
+                }} else {{
+                    const kF = cur.k.find(x=>x.time===p.time);
+                    const dF = cur.d.find(x=>x.time===p.time);
+                    if (kF && dF) {{
+                        const kdColor = kF.value>dF.value ? '#f59e0b' : '#a78bfa';
+                        document.getElementById('sub-values').innerHTML =
+                            `<span style="color:#f59e0b">K<b>${{kF.value}}</b></span>` +
+                            ` <span style="color:#a78bfa">D<b>${{dF.value}}</b></span>` +
+                            ` <span style="color:${{kdColor}};font-size:10px;">${{kF.value>dF.value?'▲金叉':'▼死叉'}}</span>`;
+                    }}
                 }}
             }});
         }}
-        syncCross(mainChart, [volChart, kdChart], [volSeries, kLine]);
-        syncCross(volChart,  [mainChart, kdChart], [candles, kLine]);
-        syncCross(kdChart,   [mainChart, volChart], [candles, volSeries]);
+
+        bindCross(mainChart, [{{chart:volChart, series:volSeries}}, {{chart:subChart, series:subSeries[0]||volSeries}}]);
+        bindCross(volChart,  [{{chart:mainChart, series:candles}}, {{chart:subChart, series:subSeries[0]||candles}}]);
+        bindCross(subChart,  [{{chart:mainChart, series:candles}}, {{chart:volChart, series:volSeries}}]);
 
         loadData('D');
     </script></body></html>
