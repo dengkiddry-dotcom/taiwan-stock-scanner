@@ -509,7 +509,7 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
         recent_close = close.iloc[-90:]
         recent_ma240 = ma240.iloc[-90:]
         broken = (recent_close > recent_ma240) & (recent_close.shift(1) <= recent_ma240.shift(1))
-        if not bool(broken.any()): return None
+        if not broken.any(axis=None): return None
 
         p_min_90 = float(recent_close.min())
         p_max_90 = float(recent_close.max())
