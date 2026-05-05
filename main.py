@@ -411,9 +411,13 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
 
                 // OHLC 更新
                 const d = allData[currentPeriod].ohlcv.find(x => x.time===p.time);
-                if (d) {{
-                    const chg = d.close-d.open;
-                    const chgPct = (chg/d.open*100).toFixed(2);
+                const ohlcv = allData[currentPeriod].ohlcv;
+                const idx = ohlcv.findIndex(x => x.time===p.time);
+                const d = idx >= 0 ? ohlcv[idx] : null;
+                if (d) {
+                   const prevClose = idx > 0 ? ohlcv[idx-1].close : d.open;
+                   const chg = d.close - prevClose;
+                   const chgPct = (chg / prevClose * 100).toFixed(2);
                     const cc = chg>=0 ? '#d32f2f' : '#00897b';
                     document.getElementById('ohlc-info').innerHTML =
                         `<span style="color:#555">${{p.time}}</span>` +
