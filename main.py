@@ -509,6 +509,7 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
         recent_close = close.iloc[-90:]
         recent_ma240 = ma240.iloc[-90:]
         broken = (recent_close > recent_ma240) & (recent_close.shift(1) <= recent_ma240.shift(1))
+        # ✅ 修正一：axis=None 確保不論 Series 或 DataFrame 都回傳單一布林值
         if not broken.any(axis=None): return None
 
         p_min_90 = float(recent_close.min())
@@ -529,9 +530,12 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
         dist_ma60 = (curr_c - curr_ma60) / curr_ma60
         if abs(dist_ma60) > 0.025: return None
 
+        # ✅ 修正二：改用明確的 astype(float) 取出 Series，避免 .squeeze() 在新版 pandas 行為不一致
         win_kd = 9
-        rsv = ((close - df['Low'].squeeze().rolling(win_kd).min()) /
-               (df['High'].squeeze().rolling(win_kd).max() - df['Low'].squeeze().rolling(win_kd).min()) * 100).fillna(50)
+        low_s  = df['Low'].astype(float)
+        high_s = df['High'].astype(float)
+        rsv = ((close - low_s.rolling(win_kd).min()) /
+               (high_s.rolling(win_kd).max() - low_s.rolling(win_kd).min()) * 100).fillna(50)
         k = rsv.ewm(com=2).mean()
         d = k.ewm(com=2).mean()
 
