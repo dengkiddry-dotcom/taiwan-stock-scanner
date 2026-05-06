@@ -60,7 +60,6 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
                 l = round(float(row['Low']), 2)
                 c = round(float(row['Close']), 2)
                 v = float(row['Volume'])
-                # 過濾掉任何 NaN 或無效資料
                 if any(x != x for x in [o, h, l, c, v]): continue
                 if h < l or h <= 0 or c <= 0: continue
                 result.append({
@@ -101,10 +100,8 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
     monthly_data = df_to_ohlcv(df_m, [])
     monthly_k, monthly_d = calc_kd(df_m)
 
-    # 漲停日期列表轉 JS
     limit_dates_js = json.dumps([d.strftime('%Y-%m-%d') for d in limit_dates])
 
-    # 如果日線資料是空的，回傳錯誤提示頁面
     if not daily_data:
         return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
         <meta name="viewport" content="width=device-width,initial-scale=1.0">
@@ -115,7 +112,6 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
         <p style="color:#8b949e;">無法取得此股票的 K 線資料，可能原因：yfinance 不支援此代碼，或資料尚未更新。</p>
         </body></html>"""
 
-    # 計算 MACD（週線用）
     def calc_macd(d, fast=12, slow=26, signal=9):
         close = pd.to_numeric(d['Close'].squeeze(), errors='coerce').dropna()
         ema_fast = close.ewm(span=fast, adjust=False).mean()
@@ -141,8 +137,6 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
     weekly_dif_js = json.dumps(weekly_dif)
     weekly_macd_js = json.dumps(weekly_macd)
     weekly_osc_js = json.dumps(weekly_osc)
-
-
 
     return f"""
     <!DOCTYPE html><html><head><meta charset="utf-8">
@@ -200,7 +194,6 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
                   dif:null, macd:null, osc:null }}
         }};
 
-        // 每個週期的預設均線
         const defaultMA = {{ D:'5,10,20,60,120,240', W:'5,10,20', M:'5,60,120' }};
         let currentPeriod = 'D';
         const maColors = ['#f59e0b','#a78bfa','#34d399','#fb7185','#38bdf8','#f97316'];
@@ -317,7 +310,6 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
             const d = allData[period];
 
             if (period === 'W') {{
-                // MACD
                 document.getElementById('sub-label').textContent = 'MACD ▶';
                 const difS  = subChart.addLineSeries({{ color:'#38bdf8', lineWidth:1.5, lastValueVisible:false, crosshairMarkerVisible:false }});
                 const macdS = subChart.addLineSeries({{ color:'#f97316', lineWidth:1.5, lastValueVisible:false, crosshairMarkerVisible:false }});
@@ -329,14 +321,12 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
                     color: x.value >= 0 ? '#d32f2f99' : '#00897b99'
                 }})));
                 subSeries = [difS, macdS, oscS];
-                // 顯示最新值
                 const lastDif  = d.dif.length>0  ? d.dif[d.dif.length-1].value   : '-';
                 const lastMacd = d.macd.length>0 ? d.macd[d.macd.length-1].value : '-';
                 document.getElementById('sub-values').innerHTML =
                     `<span style="color:#38bdf8">DIF<b>${{lastDif}}</b></span>` +
                     ` <span style="color:#f97316">MACD<b>${{lastMacd}}</b></span>`;
             }} else {{
-                // KD
                 document.getElementById('sub-label').textContent = 'KD ▶';
                 const kS = subChart.addLineSeries({{ color:'#f59e0b', lineWidth:1.5, lastValueVisible:false, crosshairMarkerVisible:false }});
                 const dS = subChart.addLineSeries({{ color:'#a78bfa', lineWidth:1.5, lastValueVisible:false, crosshairMarkerVisible:false }});
@@ -358,6 +348,64 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
         const limitMarkers = limitDates.map(d => ({{
             time:d, position:'aboveBar', color:'#f8d210', shape:'arrowDown', text:'🚀'
         }}));
+
+        // ── 扣抵位置虛線 ──────────────────────────────────────
+        // 固定顯示 5/10/20/60 四條均線的扣抵日，顏色對應 maColors
+        const DEDUCT_MA_DEFS = [
+            {{ period: 5,  color: '#f59e0b' }},
+            {{ period: 10, color: '#a78bfa' }},
+            {{ period: 20, color: '#34d399' }},
+            {{ period: 60, color: '#fb7185' }},
+        ];
+        let deductLines = [];
+
+        function showDeductLines(currentTime) {{
+            // 先清除舊的扣抵線
+            deductLines.forEach(s => mainChart.removeSeries(s));
+            deductLines = [];
+            if (!currentTime) return;
+
+            const ohlcv = allData[currentPeriod].ohlcv;
+            const idx = ohlcv.findIndex(x => x.time === currentTime);
+            if (idx < 0) return;
+
+            DEDUCT_MA_DEFS.forEach(({{ period, color }}) => {{
+                // 扣抵日 = 當前 crosshair 位置往前推 (period-1) 根
+                const deductIdx = idx - (period - 1);
+                if (deductIdx < 0) return;  // 資料不足，跳過
+
+                const deductTime = ohlcv[deductIdx].time;
+                const deductClose = ohlcv[deductIdx].close;
+
+                // 建立虛線 series，只放扣抵日那一點
+                const s = mainChart.addLineSeries({{
+                    color: color,
+                    lineWidth: 1,
+                    lineStyle: 2,   // 2 = Dashed 虛線
+                    lastValueVisible: false,
+                    priceLineVisible: false,
+                    crosshairMarkerVisible: false,
+                }});
+
+                // 用扣抵日收盤價放一個點，搭配 marker 顯示標籤
+                s.setData([{{ time: deductTime, value: deductClose }}]);
+                s.setMarkers([{{
+                    time: deductTime,
+                    position: 'belowBar',
+                    color: color,
+                    shape: 'arrowUp',
+                    text: `扣${{period}}`,
+                    size: 0.8,
+                }}]);
+
+                deductLines.push(s);
+            }});
+        }}
+
+        function clearDeductLines() {{
+            deductLines.forEach(s => mainChart.removeSeries(s));
+            deductLines = [];
+        }}
 
         // ── 載入資料 ──
         function loadData(period) {{
@@ -381,6 +429,7 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
         }}
 
         function switchPeriod(period, btn) {{
+            clearDeductLines();   // 切換週期時清除殘留的扣抵線
             currentPeriod = period;
             document.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
@@ -404,10 +453,20 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
         let syncingCross = false;
         function bindCross(src, refMap) {{
             src.subscribeCrosshairMove(p => {{
-                if (syncingCross || !p.time) return;
+                // crosshair 離開圖表時清除扣抵線
+                if (!p.time) {{
+                    clearDeductLines();
+                    return;
+                }}
+                if (syncingCross) return;
                 syncingCross = true;
                 refMap.forEach(({{chart, series}}) => chart.setCrosshairPosition(p.price, p.time, series));
                 syncingCross = false;
+
+                // 扣抵線：只在主圖 crosshair 移動且日線模式下觸發
+                if (src === mainChart && currentPeriod === 'D') {{
+                    showDeductLines(p.time);
+                }}
 
                 // OHLC 更新
                 const ohlcv = allData[currentPeriod].ohlcv;
@@ -428,7 +487,7 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
                     // VOL 更新
                     document.getElementById('vol-values').innerHTML =
                         `<span style="color:${{d.close>=d.open?'#d32f2f':'#00897b'}}">${{fmtVol(d.value)}}</span>`;
-                    // MA 更新
+                    // MA 數值更新
                     maPeriodsCache.forEach(period => {{
                         const maData = calcMA(allData[currentPeriod].ohlcv, period);
                         const found = maData.find(m => m.time===p.time);
@@ -488,17 +547,14 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
 
         if df is None or df.empty: return None
 
-        # 處理 MultiIndex
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # 修正欄位名稱大小寫不一致（新版 yfinance 可能回傳小寫）
         df.columns = [c.capitalize() for c in df.columns]
 
         required = ['Open', 'High', 'Low', 'Close', 'Volume']
         if not all(c in df.columns for c in required): return None
 
-        # 確保資料是 float 且移除 Close 為 NaN 的列
         df = df[required].astype(float).dropna(subset=['Close'])
 
         if len(df) < 240: return None
@@ -512,7 +568,6 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
         recent_close = close.iloc[-90:]
         recent_ma240 = ma240.iloc[-90:]
         broken = (recent_close > recent_ma240) & (recent_close.shift(1) <= recent_ma240.shift(1))
-        # ✅ 修正一：axis=None 確保不論 Series 或 DataFrame 都回傳單一布林值
         if not broken.any(axis=None): return None
 
         p_min_90 = float(recent_close.min())
@@ -533,7 +588,6 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
         dist_ma60 = (curr_c - curr_ma60) / curr_ma60
         if abs(dist_ma60) > 0.025: return None
 
-        # ✅ 修正二：改用明確的 astype(float) 取出 Series，避免 .squeeze() 在新版 pandas 行為不一致
         win_kd = 9
         low_s  = df['Low'].astype(float)
         high_s = df['High'].astype(float)
@@ -542,28 +596,22 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
         k = rsv.ewm(com=2).mean()
         d = k.ewm(com=2).mean()
 
-        reasons = []  # 選股理由
+        reasons = []
 
-        # ── 硬性過濾（不符合直接排除）──────────────────────────
-        # 1. 型態破壞：收盤跌破漲停日低點 97%
         if curr_c < limit_low * 0.97:
             return None
 
-        # 2. 整理天數：漲停後必須在 5～25 天內
         days_since = (today - last_limit_date).days
         if not (5 <= days_since <= 25):
             return None
 
-        # 3. 位階過高：股價超過年線 180% 直接排除
         curr_ma240 = float(ma240.iloc[-1])
         price_ma240_ratio = curr_c / curr_ma240
         if price_ma240_ratio > 1.8:
             return None
 
-        # ── 勝率評分 ──────────────────────────────────────────
         win_rate = 45
 
-        # A. 季線方向
         if float(ma60.iloc[-1]) > float(ma60.iloc[-5]):
             win_rate += 10
             reasons.append("✅ 季線向上")
@@ -571,7 +619,6 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
             win_rate -= 15
             reasons.append("⚠️ 季線走平或向下")
 
-        # B. 成交量：近3日均量 vs 漲停爆量
         pullback_vol_ratio = float(volume.iloc[-3:].mean()) / limit_vol
         if pullback_vol_ratio < 0.35:
             win_rate += 15
@@ -583,7 +630,6 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
             win_rate -= 10
             reasons.append(f"⚠️ 量未明顯縮（近3日均量{pullback_vol_ratio*100:.0f}%）")
 
-        # C. 位階
         if price_ma240_ratio > 1.4:
             win_rate -= 10
             reasons.append(f"⚠️ 位階偏高（股價為年線{price_ma240_ratio*100:.0f}%）")
@@ -593,7 +639,6 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
         else:
             reasons.append(f"📍 位階：股價為年線{price_ma240_ratio*100:.0f}%")
 
-        # D. KD 金叉
         if float(k.iloc[-1]) > float(d.iloc[-1]) and float(k.iloc[-2]) <= float(d.iloc[-2]):
             win_rate += 10
             reasons.append("✅ KD 低檔金叉")
@@ -601,14 +646,12 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
             win_rate += 5
             reasons.append("📍 KD K>D 上行中")
 
-        # E. 整理天數最佳區間
         if 7 <= days_since <= 15:
             win_rate += 10
             reasons.append(f"✅ 整理天數理想（{days_since}天）")
         else:
             reasons.append(f"📍 整理天數：{days_since}天")
 
-        # F. 大盤位置分段
         twii_close_val, twii_ma20_val, twii_ma60_val, twii_ma240_val = twii_bull
         if twii_close_val > twii_ma20_val:
             win_rate += 15
@@ -622,7 +665,6 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
         else:
             reasons.append("📍 大盤整理中")
 
-        # G. 第一波強度
         if wave_gain >= 0.5:
             win_rate += 10
             reasons.append(f"✅ 第一波強勁（漲幅{wave_gain*100:.0f}%）")
@@ -631,17 +673,14 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
 
         win_rate = max(10, min(win_rate, 90))
 
-        # ── 目標價（黃金切割）──────────────────────────────────
         diff = p_max_90 - p_min_90
         t1 = round(p_max_90 + diff*0.382, 2)
         t2 = round(p_max_90 + diff*0.618, 2)
         t3 = round(p_max_90 + diff*1.0, 2)
 
-        # ── 觸發價（突破近期高點）──────────────────────────────
         recent_high = float(df['High'].iloc[-20:].max())
         trigger_price = round(recent_high * 1.01, 2)
 
-        # ── 支撐群掛單區間 ──────────────────────────────────────
         limit_open = safe_float(df.loc[last_limit_date, 'Open'])
         recent_low_support = float(df['Low'].iloc[-20:].min())
         support_candidates = [curr_ma60, limit_open, limit_low, recent_low_support]
@@ -687,7 +726,7 @@ def scan(today_str, output_dir="charts"):
     name_map = fetch_name_map()
     stocks = get_list()
     today = datetime.now()
-    fetch_start = datetime(2000, 1, 1)  # 抓全歷史資料
+    fetch_start = datetime(2000, 1, 1)
     results = []
 
     try:
@@ -740,7 +779,6 @@ def to_html(df, today_str, is_history=False):
     if not df.empty:
         rows_html = ""
         for _, row in df.iterrows():
-            # 勝率
             win_str = str(row.get("勝率", "0%")).replace("%", "")
             try: win_val = int(win_str)
             except: win_val = 0
@@ -751,7 +789,6 @@ def to_html(df, today_str, is_history=False):
             else:
                 win_color = "#26a69a"; win_bg = "#0d2420"
 
-            # KD 金叉/死叉
             try:
                 k_val = float(row.get("K", 50))
                 d_val = float(row.get("D", 50))
@@ -760,9 +797,7 @@ def to_html(df, today_str, is_history=False):
             except:
                 kd_color = "#888"; kd_tag = "-"
 
-            # 收盤價
             close_val = row.get("收盤價", "")
-            # 停損距離%
             try:
                 stop = float(row.get("停損價", 0))
                 close_f = float(close_val)
