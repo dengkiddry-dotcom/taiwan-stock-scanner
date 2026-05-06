@@ -360,7 +360,6 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
         let deductLines = [];
 
         function showDeductLines(currentTime) {{
-            // 先清除舊的扣抵線
             deductLines.forEach(s => mainChart.removeSeries(s));
             deductLines = [];
             if (!currentTime) return;
@@ -369,33 +368,43 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
             const idx = ohlcv.findIndex(x => x.time === currentTime);
             if (idx < 0) return;
 
+            // 取得可見範圍最高最低價，讓尖峰線撐滿圖面
+            const visibleData = ohlcv.slice(Math.max(0, idx - 120), idx + 1);
+            const priceHigh = Math.max(...visibleData.map(x => x.high)) * 1.05;
+            const priceLow  = Math.min(...visibleData.map(x => x.low))  * 0.95;
+
             DEDUCT_MA_DEFS.forEach(({{ period, color }}) => {{
                 // 扣抵日 = 當前 crosshair 位置往前推 (period-1) 根
                 const deductIdx = idx - (period - 1);
-                if (deductIdx < 0) return;  // 資料不足，跳過
+                if (deductIdx < 0) return;
 
                 const deductTime = ohlcv[deductIdx].time;
-                const deductClose = ohlcv[deductIdx].close;
+                const prevTime = deductIdx > 0 ? ohlcv[deductIdx - 1].time : null;
+                const nextTime = deductIdx < ohlcv.length - 1 ? ohlcv[deductIdx + 1].time : null;
 
-                // 建立虛線 series，只放扣抵日那一點
                 const s = mainChart.addLineSeries({{
-                    color: color,
+                    color: color + 'cc',
                     lineWidth: 1,
-                    lineStyle: 2,   // 2 = Dashed 虛線
+                    lineStyle: 1,   // 1 = Dotted
                     lastValueVisible: false,
                     priceLineVisible: false,
                     crosshairMarkerVisible: false,
                 }});
 
-                // 用扣抵日收盤價放一個點，搭配 marker 顯示標籤
-                s.setData([{{ time: deductTime, value: deductClose }}]);
+                // 前一日低點 → 扣抵日高點 → 後一日低點，構成尖峰讓線段可見
+                const pts = [];
+                if (prevTime) pts.push({{ time: prevTime, value: priceLow }});
+                pts.push({{ time: deductTime, value: priceHigh }});
+                if (nextTime) pts.push({{ time: nextTime, value: priceLow }});
+                s.setData(pts);
+
                 s.setMarkers([{{
                     time: deductTime,
                     position: 'belowBar',
                     color: color,
                     shape: 'arrowUp',
                     text: `扣${{period}}`,
-                    size: 0.8,
+                    size: 1,
                 }}]);
 
                 deductLines.push(s);
