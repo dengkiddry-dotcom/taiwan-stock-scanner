@@ -59,7 +59,7 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
                 h = round(float(row['High']), 2)
                 l = round(float(row['Low']), 2)
                 c = round(float(row['Close']), 2)
-                v = float(row['Volume'])
+                v = float(row['Volume']) / 1000  # 股數轉張
                 if any(x != x for x in [o, h, l, c, v]): continue
                 if h < l or h <= 0 or c <= 0: continue
                 result.append({
@@ -178,7 +178,7 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
     <div class="info-bar"><span id="ohlc-info" style="color:#666;">← 滑動查看</span></div>
     <div class="chart-label"><span class="lbl">MA ▶</span><span id="ma-values"></span></div>
     <div id="main-chart"></div>
-    <div class="chart-label"><span class="lbl">VOL ▶</span><span id="vol-values"></span></div>
+    <div class="chart-label"><span class="lbl">VOL(張) ▶</span><span id="vol-values"></span></div>
     <div id="vol-chart"></div>
     <div class="chart-label"><span class="lbl" id="sub-label">KD ▶</span><span id="sub-values"></span></div>
     <div id="sub-chart"></div>
@@ -256,9 +256,9 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
         }}
 
         function fmtVol(v) {{
-            if (v >= 1e8) return (v/1e8).toFixed(1)+'億';
-            if (v >= 1e4) return (v/1e4).toFixed(0)+'萬';
-            return v;
+            if (v >= 100000) return (v/10000).toFixed(1)+'萬張';
+            if (v >= 1000) return (v/1000).toFixed(1)+'千張';
+            return Math.round(v)+'張';
         }}
 
         // ── 套用均線 ──
@@ -349,73 +349,6 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
             time:d, position:'aboveBar', color:'#f8d210', shape:'arrowDown', text:'🚀'
         }}));
 
-        // ── 扣抵位置虛線 ──────────────────────────────────────
-        // 固定顯示 5/10/20/60 四條均線的扣抵日，顏色對應 maColors
-        const DEDUCT_MA_DEFS = [
-            {{ period: 5,  color: '#f59e0b' }},
-            {{ period: 10, color: '#a78bfa' }},
-            {{ period: 20, color: '#34d399' }},
-            {{ period: 60, color: '#fb7185' }},
-        ];
-        let deductLines = [];
-
-        function showDeductLines(currentTime) {{
-            deductLines.forEach(s => mainChart.removeSeries(s));
-            deductLines = [];
-            if (!currentTime) return;
-
-            const ohlcv = allData[currentPeriod].ohlcv;
-            const idx = ohlcv.findIndex(x => x.time === currentTime);
-            if (idx < 0) return;
-
-            // 取得可見範圍最高最低價，讓尖峰線撐滿圖面
-            const visibleData = ohlcv.slice(Math.max(0, idx - 120), idx + 1);
-            const priceHigh = Math.max(...visibleData.map(x => x.high)) * 1.05;
-            const priceLow  = Math.min(...visibleData.map(x => x.low))  * 0.95;
-
-            DEDUCT_MA_DEFS.forEach(({{ period, color }}) => {{
-                // 扣抵日 = 當前 crosshair 位置往前推 (period-1) 根
-                const deductIdx = idx - (period - 1);
-                if (deductIdx < 0) return;
-
-                const deductTime = ohlcv[deductIdx].time;
-                const prevTime = deductIdx > 0 ? ohlcv[deductIdx - 1].time : null;
-                const nextTime = deductIdx < ohlcv.length - 1 ? ohlcv[deductIdx + 1].time : null;
-
-                const s = mainChart.addLineSeries({{
-                    color: color + 'cc',
-                    lineWidth: 1,
-                    lineStyle: 1,   // 1 = Dotted
-                    lastValueVisible: false,
-                    priceLineVisible: false,
-                    crosshairMarkerVisible: false,
-                }});
-
-                // 前一日低點 → 扣抵日高點 → 後一日低點，構成尖峰讓線段可見
-                const pts = [];
-                if (prevTime) pts.push({{ time: prevTime, value: priceLow }});
-                pts.push({{ time: deductTime, value: priceHigh }});
-                if (nextTime) pts.push({{ time: nextTime, value: priceLow }});
-                s.setData(pts);
-
-                s.setMarkers([{{
-                    time: deductTime,
-                    position: 'belowBar',
-                    color: color,
-                    shape: 'arrowUp',
-                    text: `扣${{period}}`,
-                    size: 1,
-                }}]);
-
-                deductLines.push(s);
-            }});
-        }}
-
-        function clearDeductLines() {{
-            deductLines.forEach(s => mainChart.removeSeries(s));
-            deductLines = [];
-        }}
-
         // ── 載入資料 ──
         function loadData(period) {{
             const d = allData[period];
@@ -438,7 +371,6 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
         }}
 
         function switchPeriod(period, btn) {{
-            clearDeductLines();   // 切換週期時清除殘留的扣抵線
             currentPeriod = period;
             document.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
@@ -462,20 +394,11 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
         let syncingCross = false;
         function bindCross(src, refMap) {{
             src.subscribeCrosshairMove(p => {{
-                // crosshair 離開圖表時清除扣抵線
-                if (!p.time) {{
-                    clearDeductLines();
-                    return;
-                }}
+                if (!p.time) return;
                 if (syncingCross) return;
                 syncingCross = true;
                 refMap.forEach(({{chart, series}}) => chart.setCrosshairPosition(p.price, p.time, series));
                 syncingCross = false;
-
-                // 扣抵線：只在主圖 crosshair 移動且日線模式下觸發
-                if (src === mainChart && currentPeriod === 'D') {{
-                    showDeductLines(p.time);
-                }}
 
                 // OHLC 更新
                 const ohlcv = allData[currentPeriod].ohlcv;
@@ -568,8 +491,9 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
 
         if len(df) < 240: return None
 
-        close = df['Close']
-        volume = df['Volume'].fillna(0)
+        # ── 修正：squeeze 避免 pandas MultiIndex 問題 ──
+        close = df['Close'].squeeze()
+        volume = df['Volume'].squeeze().fillna(0)
 
         ma60 = close.rolling(60).mean()
         ma240 = close.rolling(240).mean()
@@ -589,6 +513,7 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
         if not limit_dates: return None
 
         last_limit_date = limit_dates[-1]
+        last_limit_idx = close.index.get_loc(last_limit_date)
         limit_vol = safe_float(volume.loc[last_limit_date])
         limit_low = safe_float(df.loc[last_limit_date, 'Low'])
 
@@ -598,8 +523,8 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
         if abs(dist_ma60) > 0.025: return None
 
         win_kd = 9
-        low_s  = df['Low'].astype(float)
-        high_s = df['High'].astype(float)
+        low_s  = df['Low'].squeeze().astype(float)
+        high_s = df['High'].squeeze().astype(float)
         rsv = ((close - low_s.rolling(win_kd).min()) /
                (high_s.rolling(win_kd).max() - low_s.rolling(win_kd).min()) * 100).fillna(50)
         k = rsv.ewm(com=2).mean()
@@ -618,6 +543,21 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
         price_ma240_ratio = curr_c / curr_ma240
         if price_ma240_ratio > 1.8:
             return None
+
+        # ── 漲停前低波動蓄力篩選 ──
+        pre_limit_start = max(0, last_limit_idx - 30)
+        pre_limit_close = close.iloc[pre_limit_start:last_limit_idx]
+        if len(pre_limit_close) >= 10:
+            pre_limit_std_ratio = float(pre_limit_close.std()) / float(pre_limit_close.mean())
+        else:
+            pre_limit_std_ratio = 1.0
+
+        # ── 漲停日量能啟動倍數 ──
+        vol_ma10_before = float(volume.iloc[max(0, last_limit_idx-10):last_limit_idx].mean())
+        if vol_ma10_before > 0:
+            limit_vol_ratio_activate = limit_vol / vol_ma10_before
+        else:
+            limit_vol_ratio_activate = 0
 
         win_rate = 45
 
@@ -680,6 +620,26 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
         else:
             reasons.append(f"📍 第一波漲幅{wave_gain*100:.0f}%")
 
+        # ── 蓄力結構評分 ──
+        if pre_limit_std_ratio < 0.04:
+            win_rate += 15
+            reasons.append(f"✅ 漲停前強力蓄力（波動率{pre_limit_std_ratio*100:.1f}%）")
+        elif pre_limit_std_ratio < 0.07:
+            win_rate += 8
+            reasons.append(f"✅ 漲停前低波動蓄力（波動率{pre_limit_std_ratio*100:.1f}%）")
+        else:
+            reasons.append(f"📍 漲停前波動率{pre_limit_std_ratio*100:.1f}%")
+
+        # ── 量能啟動評分 ──
+        if limit_vol_ratio_activate >= 5.0:
+            win_rate += 15
+            reasons.append(f"✅ 量能爆發啟動（漲停量為前10日均量{limit_vol_ratio_activate:.1f}倍）")
+        elif limit_vol_ratio_activate >= 3.0:
+            win_rate += 8
+            reasons.append(f"✅ 量能明顯放大（{limit_vol_ratio_activate:.1f}倍）")
+        else:
+            reasons.append(f"📍 量能啟動倍數{limit_vol_ratio_activate:.1f}倍")
+
         win_rate = max(10, min(win_rate, 90))
 
         diff = p_max_90 - p_min_90
@@ -698,6 +658,10 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
         order_low  = round(support_price * 0.99, 2)
         order_high = round(support_price * 1.01, 2)
 
+        # 今日成交量（張）
+        today_vol_shares = int(volume.iloc[-3:].mean())
+        today_vol_張 = round(today_vol_shares / 1000, 0)
+
         code = s.split('.')[0]
         chart_html = generate_stock_chart(
             s, name_map.get(code, code), df, limit_dates,
@@ -715,6 +679,7 @@ def process_stock(s, fetch_start, today, name_map, twii_bull, output_dir):
             "代碼": f"<a href='./charts/{code}.html' target='_blank'>{code} 📊</a>",
             "名稱": name_map.get(code, code),
             "收盤價": round(curr_c, 2),
+            "成交量(張)": int(today_vol_張),
             "勝率": f"{win_rate}%",
             "掛單區間": f"{order_low}～{order_high}",
             "觸發價": trigger_price,
@@ -743,7 +708,7 @@ def scan(today_str, output_dir="charts"):
         if isinstance(twii_raw.columns, pd.MultiIndex):
             twii_raw.columns = twii_raw.columns.get_level_values(0)
         twii_raw.columns = [c.capitalize() for c in twii_raw.columns]
-        twii_c = twii_raw['Close']
+        twii_c = twii_raw['Close'].squeeze()
         twii_bull = (
             float(twii_c.iloc[-1]),
             float(twii_c.rolling(20).mean().iloc[-1]),
@@ -816,6 +781,8 @@ def to_html(df, today_str, is_history=False):
                 stop_str = str(row.get("停損價", ""))
 
             trigger = row.get("觸發價", "")
+            vol_val = row.get("成交量(張)", "")
+
             reason_html = ""
             for r in str(row.get("選股理由","")).split("｜"):
                 r = r.strip()
@@ -833,6 +800,7 @@ def to_html(df, today_str, is_history=False):
                 <td style="text-align:left;padding-left:10px;min-width:80px;">{row.get("代碼","")}</td>
                 <td style="text-align:left;min-width:70px;color:#ccc;">{row.get("名稱","")}</td>
                 <td style="color:#ff4040;font-weight:bold;font-size:15px;min-width:60px;">{close_val}</td>
+                <td style="color:#aaa;font-size:12px;min-width:70px;">{vol_val}</td>
                 <td style="min-width:65px;">
                     <span style="background:{win_bg};color:{win_color};font-weight:bold;padding:4px 8px;border-radius:4px;border:1px solid {win_color};font-size:13px;">{row.get("勝率","")}</span>
                 </td>
@@ -858,6 +826,7 @@ def to_html(df, today_str, is_history=False):
                     <th>代碼 📊</th>
                     <th>名稱</th>
                     <th>收盤價</th>
+                    <th>成交量(張)</th>
                     <th>勝率</th>
                     <th>掛單區間</th>
                     <th>觸發價</th>
