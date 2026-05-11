@@ -28,3 +28,4 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./
           publish_branch: gh-pages
+          force_orphan: true   # 每次建立全新 orphan commit，避免 push rejected
