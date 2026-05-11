@@ -160,6 +160,14 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
         #main-chart {{ flex:6; width:100%; min-height:0; }}
         #vol-chart  {{ flex:2; width:100%; min-height:0; }}
         #sub-chart  {{ flex:2; width:100%; min-height:0; }}
+        /* 長按提示 */
+        #pin-toast {{
+            position:fixed; bottom:60px; left:50%; transform:translateX(-50%);
+            background:#222; color:#f59e0b; border:1px solid #f59e0b;
+            padding:4px 14px; border-radius:12px; font-size:11px;
+            opacity:0; transition:opacity 0.3s; pointer-events:none; z-index:999;
+        }}
+        #pin-toast.show {{ opacity:1; }}
     </style>
     </head><body>
     <div id="header">
@@ -175,13 +183,14 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
             <button class="btn" onclick="applyMA()">均線</button>
         </div>
     </div>
-    <div class="info-bar"><span id="ohlc-info" style="color:#666;">← 滑動查看</span></div>
+    <div class="info-bar"><span id="ohlc-info" style="color:#666;">← 滑動查看｜長按K棒釘選虛線</span></div>
     <div class="chart-label"><span class="lbl">MA ▶</span><span id="ma-values"></span></div>
     <div id="main-chart"></div>
     <div class="chart-label"><span class="lbl">VOL(張) ▶</span><span id="vol-values"></span></div>
     <div id="vol-chart"></div>
     <div class="chart-label"><span class="lbl" id="sub-label">KD ▶</span><span id="sub-values"></span></div>
     <div id="sub-chart"></div>
+    <div id="pin-toast">📌 已釘選</div>
 
     <script>
         // ── 資料 ──
@@ -371,6 +380,7 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
         }}
 
         function switchPeriod(period, btn) {{
+            clearPinnedLines();   // 切換週期時清除釘選虛線
             currentPeriod = period;
             document.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
@@ -460,6 +470,142 @@ def generate_stock_chart(symbol, name, df, limit_dates, buy_date, ma60_series, m
         bindCross(subChart,  [{{chart:mainChart, series:candles}}, {{chart:volChart, series:volSeries}}]);
 
         loadData('D');
+
+        // ════════════════════════════════════════════════════
+        // ── 長按釘選虛線功能 ────────────────────────────────
+        // ════════════════════════════════════════════════════
+        let pinnedTime    = null;   // 目前釘選的 K 棒時間
+        let pinnedLines   = [];     // [{{series, chart}}, ...]
+        let longPressTimer = null;
+        let touchMoved    = false;
+
+        // 顯示短暫提示 toast
+        function showToast(msg) {{
+            const el = document.getElementById('pin-toast');
+            el.textContent = msg;
+            el.classList.add('show');
+            clearTimeout(el._timer);
+            el._timer = setTimeout(() => el.classList.remove('show'), 1500);
+        }}
+
+        // 清除所有釘選虛線
+        function clearPinnedLines() {{
+            pinnedLines.forEach(item => {{
+                try {{ item.chart.removeSeries(item.series); }} catch(e) {{}}
+            }});
+            pinnedLines = [];
+            pinnedTime  = null;
+        }}
+
+        // 畫釘選虛線（主圖開高低收 + 成交量圖量能水平線）
+        function drawPinnedLines(time) {{
+            clearPinnedLines();
+            pinnedTime = time;
+
+            const ohlcv = allData[currentPeriod].ohlcv;
+            const bar   = ohlcv.find(x => x.time === time);
+            if (!bar) return;
+
+            const DASHED = 2;   // LightweightCharts LineStyle: 0=solid, 1=dotted, 2=dashed
+            const LW     = 1;
+            const allTimes = ohlcv.map(x => x.time);
+
+            // 主圖：開（灰）/ 高（紅）/ 低（綠）/ 收（橙）四條虛線
+            const priceLines = [
+                {{ value: bar.open,  color: '#aaaaaa', title: `開 ${{bar.open}}`  }},
+                {{ value: bar.high,  color: '#e57373', title: `高 ${{bar.high}}`  }},
+                {{ value: bar.low,   color: '#4db6ac', title: `低 ${{bar.low}}`   }},
+                {{ value: bar.close, color: '#f59e0b', title: `收 ${{bar.close}}` }},
+            ];
+
+            priceLines.forEach(pl => {{
+                const s = mainChart.addLineSeries({{
+                    color: pl.color,
+                    lineWidth: LW,
+                    lineStyle: DASHED,
+                    priceLineVisible: false,
+                    lastValueVisible: true,
+                    crosshairMarkerVisible: false,
+                    title: pl.title,
+                }});
+                s.setData(allTimes.map(t => ({{ time: t, value: pl.value }})));
+                pinnedLines.push({{ series: s, chart: mainChart }});
+            }});
+
+            // 成交量圖：量能水平虛線（橙色）
+            const volS = volChart.addLineSeries({{
+                color: '#f59e0b',
+                lineWidth: LW,
+                lineStyle: DASHED,
+                priceScaleId: 'right',
+                priceLineVisible: false,
+                lastValueVisible: true,
+                crosshairMarkerVisible: false,
+                title: `量 ${{Math.round(bar.value)}}`,
+            }});
+            volS.setData(allTimes.map(t => ({{ time: t, value: bar.value }})));
+            pinnedLines.push({{ series: volS, chart: volChart }});
+        }}
+
+        // ── 追蹤十字線最後停留的時間 ──
+        let lastCrosshairTime = null;
+        mainChart.subscribeCrosshairMove(p => {{
+            if (p.time) lastCrosshairTime = p.time;
+        }});
+
+        // ── 長按觸發邏輯（共用）──
+        function onLongPress() {{
+            const t = lastCrosshairTime;
+            if (!t) return;
+            if (pinnedTime === t) {{
+                // 再次長按同一根 → 取消釘選
+                clearPinnedLines();
+                showToast('📌 已取消釘選');
+            }} else {{
+                // 長按新根 → 釘選（自動取代舊的）
+                drawPinnedLines(t);
+                showToast('📌 已釘選');
+            }}
+        }}
+
+        const mainEl = document.getElementById('main-chart');
+
+        // ── Touch 長按（行動端：手指靜止 500ms）──
+        mainEl.addEventListener('touchstart', e => {{
+            touchMoved = false;
+            longPressTimer = setTimeout(() => {{
+                if (touchMoved) return;
+                onLongPress();
+            }}, 500);
+        }}, {{ passive: true }});
+
+        mainEl.addEventListener('touchmove', () => {{
+            touchMoved = true;
+            clearTimeout(longPressTimer);
+        }}, {{ passive: true }});
+
+        mainEl.addEventListener('touchend', () => {{
+            clearTimeout(longPressTimer);
+        }}, {{ passive: true }});
+
+        mainEl.addEventListener('touchcancel', () => {{
+            clearTimeout(longPressTimer);
+        }}, {{ passive: true }});
+
+        // ── 滑鼠長按（桌面端：按住 500ms，移動或放開取消計時）──
+        mainEl.addEventListener('mousedown', () => {{
+            longPressTimer = setTimeout(onLongPress, 500);
+        }});
+
+        mainEl.addEventListener('mouseup', () => {{
+            clearTimeout(longPressTimer);
+        }});
+
+        mainEl.addEventListener('mousemove', () => {{
+            // 滑鼠移動超過微小距離才取消（避免十字線更新時誤取消）
+            clearTimeout(longPressTimer);
+        }});
+
     </script></body></html>
     """
 
