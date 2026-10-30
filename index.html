@@ -1,0 +1,282 @@
+<!DOCTYPE html><html><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1.0">
+    <title>D-Pattern 選股</title>
+    <style>
+        * { box-sizing:border-box; margin:0; padding:0; }
+        body { background:#0d0d0d; color:#e0e0e0; font-family:"Microsoft JhengHei","PingFang TC",sans-serif; font-size:13px; min-height:100vh; }
+        #topbar {
+            background:linear-gradient(135deg,#1a0a0a 0%,#1a1a2e 100%);
+            border-bottom:2px solid #ff4040;
+            padding:10px 14px;
+            display:flex; justify-content:space-between; align-items:center;
+            position:sticky; top:0; z-index:100;
+        }
+        .topbar-left { display:flex; align-items:center; gap:10px; }
+        .topbar-title { color:#ff4040; font-size:17px; font-weight:bold; letter-spacing:1px; }
+        .topbar-count { background:#2a0a0a; color:#ff6060; border:1px solid #ff4040; padding:2px 8px; border-radius:10px; font-size:11px; }
+        .topbar-meta { color:#666; font-size:11px; text-align:right; line-height:1.6; }
+        .nav-bar {
+            background:#111;
+            padding:6px 14px;
+            border-bottom:1px solid #1e1e1e;
+            font-size:11px;
+            color:#555;
+            overflow-x:auto;
+            white-space:nowrap;
+        }
+        .nav-bar a { color:#58a6ff; text-decoration:none; margin-right:8px; }
+        .container { width:100%; overflow-x:auto; padding:8px 4px; }
+        table { width:100%; border-collapse:collapse; min-width:720px; }
+        thead tr {
+            background:#1a1a1a;
+            border-bottom:2px solid #ff4040;
+        }
+        th {
+            padding:10px 8px;
+            color:#888;
+            font-size:11px;
+            text-align:center;
+            letter-spacing:0.5px;
+            white-space:nowrap;
+            font-weight:normal;
+        }
+        tbody tr {
+            border-bottom:1px solid #1a1a1a;
+            transition:background 0.1s;
+        }
+        tbody tr:nth-child(even) { background:#0f0f0f; }
+        tbody tr:hover { background:#1e1e1e; }
+        td {
+            padding:10px 8px;
+            text-align:center;
+            white-space:nowrap;
+        }
+        a { color:#58a6ff; text-decoration:none; font-weight:bold; }
+        a:hover { color:#ff4040; }
+        .section-label {
+            padding:6px 14px;
+            font-size:11px;
+            color:#555;
+            border-bottom:1px solid #1a1a1a;
+            letter-spacing:1px;
+        }
+        .footer {
+            padding:14px;
+            text-align:center;
+            color:#333;
+            font-size:11px;
+            border-top:1px solid #1a1a1a;
+            margin-top:4px;
+        }
+    </style>
+    </head><body>
+    <div id="topbar">
+        <div class="topbar-left">
+            <span class="topbar-title">📈 D-Pattern</span>
+            <span class="topbar-count">共 8 檔</span>
+        </div>
+        <div class="topbar-meta">
+            更新 2026-10-31 01:55 台北
+        </div>
+    </div>
+    <div class="nav-bar"><div style='margin-bottom:16px;font-size:13px;color:#8b949e;'>📅 歷史紀錄：<a href='./history/2026-10-30.html' style='color:#58a6ff;text-decoration:none;font-weight:bold;'>2026-10-30</a></div></div>
+    <div class="section-label">▸ 葛蘭碧轉機｜突破年線 → 回測季線｜依勝率排序</div>
+    <div class="container">
+        <table>
+            <thead>
+                <tr>
+                    <th>代碼 📊</th>
+                    <th>名稱</th>
+                    <th>收盤價</th>
+                    <th>成交量(張)</th>
+                    <th>勝率</th>
+                    <th>掛單區間</th>
+                    <th>觸發價</th>
+                    <th>停損價</th>
+                    <th>目標①</th>
+                    <th>目標②</th>
+                    <th>目標③</th>
+                    <th>KD</th>
+                    <th>選股理由</th>
+                </tr>
+            </thead>
+            <tbody>
+            <tr>
+                <td style="text-align:left;padding-left:10px;min-width:80px;"><a href='./charts/2026-10-30/4755.html' target='_blank'>4755 📊</a></td>
+                <td style="text-align:left;min-width:70px;color:#ccc;">三福化</td>
+                <td style="color:#ff4040;font-weight:bold;font-size:15px;min-width:60px;">120.0</td>
+                <td style="color:#aaa;font-size:12px;min-width:70px;">99</td>
+                <td style="min-width:65px;">
+                    <span style="background:#3d1a1a;color:#ff4040;font-weight:bold;padding:4px 8px;border-radius:4px;border:1px solid #ff4040;font-size:13px;">90%</span>
+                </td>
+                <td style="color:#ffd700;font-size:12px;min-width:110px;">117.16～119.53</td>
+                <td style="color:#ff9900;font-weight:bold;min-width:65px;">138.88</td>
+                <td style="color:#26a69a;min-width:100px;">121.5 <span style='color:#888;font-size:11px;'>(1.2%)</span></td>
+                <td style="color:#ff8c00;min-width:60px;">159.47</td>
+                <td style="color:#ff6060;min-width:60px;">169.03</td>
+                <td style="color:#ff3030;font-weight:bold;min-width:60px;">184.5</td>
+                <td style="min-width:90px;">
+                    <span style="color:#ff4040;font-weight:bold;">25.5</span>
+                    <span style="color:#555;">/</span>
+                    <span style="color:#ff4040;">23.4</span>
+                    <br><span style="color:#ff4040;font-size:10px;">▲金叉</span>
+                </td>
+                <td style="text-align:left;min-width:300px;line-height:1.8;"><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 季線向上</span><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 窒息量縮（近3日均量僅漲停量9%）</span><span style="color:#666;margin-right:6px;font-size:11px;">📍 位階：股價為年線96%</span><span style="color:#666;margin-right:6px;font-size:11px;">📍 KD K>D 上行中</span><span style="color:#666;margin-right:6px;font-size:11px;">📍 整理天數：24天</span><span style="color:#666;margin-right:6px;font-size:11px;">📍 大盤整理中</span><span style="color:#666;margin-right:6px;font-size:11px;">📍 第一波漲幅39%</span><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 漲停前強力蓄力（波動率2.4%）</span><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 量能明顯放大（4.0倍）</span></td>
+            </tr>
+            <tr>
+                <td style="text-align:left;padding-left:10px;min-width:80px;"><a href='./charts/2026-10-30/8074.html' target='_blank'>8074 📊</a></td>
+                <td style="text-align:left;min-width:70px;color:#ccc;">鉅橡</td>
+                <td style="color:#ff4040;font-weight:bold;font-size:15px;min-width:60px;">53.1</td>
+                <td style="color:#aaa;font-size:12px;min-width:70px;">647</td>
+                <td style="min-width:65px;">
+                    <span style="background:#3d1a1a;color:#ff4040;font-weight:bold;padding:4px 8px;border-radius:4px;border:1px solid #ff4040;font-size:13px;">90%</span>
+                </td>
+                <td style="color:#ffd700;font-size:12px;min-width:110px;">50.59～51.61</td>
+                <td style="color:#ff9900;font-weight:bold;min-width:65px;">66.76</td>
+                <td style="color:#26a69a;min-width:100px;">54.0 <span style='color:#888;font-size:11px;'>(1.7%)</span></td>
+                <td style="color:#ff8c00;min-width:60px;">90.19</td>
+                <td style="color:#ff6060;min-width:60px;">97.91</td>
+                <td style="color:#ff3030;font-weight:bold;min-width:60px;">110.4</td>
+                <td style="min-width:90px;">
+                    <span style="color:#26a69a;font-weight:bold;">16.9</span>
+                    <span style="color:#555;">/</span>
+                    <span style="color:#26a69a;">30.7</span>
+                    <br><span style="color:#26a69a;font-size:10px;">▼死叉</span>
+                </td>
+                <td style="text-align:left;min-width:300px;line-height:1.8;"><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 季線向上</span><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 窒息量縮（近3日均量僅漲停量26%）</span><span style="color:#666;margin-right:6px;font-size:11px;">📍 位階：股價為年線92%</span><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 整理天數理想（11天）</span><span style="color:#666;margin-right:6px;font-size:11px;">📍 大盤整理中</span><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 第一波強勁（漲幅73%）</span><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 漲停前低波動蓄力（波動率5.0%）</span><span style="color:#666;margin-right:6px;font-size:11px;">📍 量能啟動倍數2.2倍</span></td>
+            </tr>
+            <tr>
+                <td style="text-align:left;padding-left:10px;min-width:80px;"><a href='./charts/2026-10-30/4989.html' target='_blank'>4989 📊</a></td>
+                <td style="text-align:left;min-width:70px;color:#ccc;">榮科</td>
+                <td style="color:#ff4040;font-weight:bold;font-size:15px;min-width:60px;">64.0</td>
+                <td style="color:#aaa;font-size:12px;min-width:70px;">9164</td>
+                <td style="min-width:65px;">
+                    <span style="background:#3d1a1a;color:#ff4040;font-weight:bold;padding:4px 8px;border-radius:4px;border:1px solid #ff4040;font-size:13px;">90%</span>
+                </td>
+                <td style="color:#ffd700;font-size:12px;min-width:110px;">62.87～64.14</td>
+                <td style="color:#ff9900;font-weight:bold;min-width:65px;">76.66</td>
+                <td style="color:#26a69a;min-width:100px;">63.5 <span style='color:#888;font-size:11px;'>(-0.8%)</span></td>
+                <td style="color:#ff8c00;min-width:60px;">133.92</td>
+                <td style="color:#ff6060;min-width:60px;">148.08</td>
+                <td style="color:#ff3030;font-weight:bold;min-width:60px;">171.0</td>
+                <td style="min-width:90px;">
+                    <span style="color:#26a69a;font-weight:bold;">30.2</span>
+                    <span style="color:#555;">/</span>
+                    <span style="color:#26a69a;">40.8</span>
+                    <br><span style="color:#26a69a;font-size:10px;">▼死叉</span>
+                </td>
+                <td style="text-align:left;min-width:300px;line-height:1.8;"><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 季線向上</span><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 量縮洗盤（近3日均量48%）</span><span style="color:#666;margin-right:6px;font-size:11px;">📍 位階：股價為年線94%</span><span style="color:#666;margin-right:6px;font-size:11px;">📍 整理天數：25天</span><span style="color:#666;margin-right:6px;font-size:11px;">📍 大盤整理中</span><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 第一波強勁（漲幅118%）</span><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 漲停前強力蓄力（波動率3.8%）</span><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 量能爆發啟動（漲停量為前10日均量7.7倍）</span></td>
+            </tr>
+            <tr>
+                <td style="text-align:left;padding-left:10px;min-width:80px;"><a href='./charts/2026-10-30/3305.html' target='_blank'>3305 📊</a></td>
+                <td style="text-align:left;min-width:70px;color:#ccc;">昇貿</td>
+                <td style="color:#ff4040;font-weight:bold;font-size:15px;min-width:60px;">109.0</td>
+                <td style="color:#aaa;font-size:12px;min-width:70px;">1405</td>
+                <td style="min-width:65px;">
+                    <span style="background:#3d1a1a;color:#ff4040;font-weight:bold;padding:4px 8px;border-radius:4px;border:1px solid #ff4040;font-size:13px;">88%</span>
+                </td>
+                <td style="color:#ffd700;font-size:12px;min-width:110px;">107.09～109.25</td>
+                <td style="color:#ff9900;font-weight:bold;min-width:65px;">122.21</td>
+                <td style="color:#26a69a;min-width:100px;">104.0 <span style='color:#888;font-size:11px;'>(-4.6%)</span></td>
+                <td style="color:#ff8c00;min-width:60px;">164.7</td>
+                <td style="color:#ff6060;min-width:60px;">177.37</td>
+                <td style="color:#ff3030;font-weight:bold;min-width:60px;">197.88</td>
+                <td style="min-width:90px;">
+                    <span style="color:#26a69a;font-weight:bold;">31.6</span>
+                    <span style="color:#555;">/</span>
+                    <span style="color:#26a69a;">35.4</span>
+                    <br><span style="color:#26a69a;font-size:10px;">▼死叉</span>
+                </td>
+                <td style="text-align:left;min-width:300px;line-height:1.8;"><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 季線向上</span><span style="color:#ffa500;margin-right:6px;font-size:11px;">⚠️ 量未明顯縮（近3日均量58%）</span><span style="color:#666;margin-right:6px;font-size:11px;">📍 位階：股價為年線97%</span><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 整理天數理想（14天）</span><span style="color:#666;margin-right:6px;font-size:11px;">📍 大盤整理中</span><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 第一波強勁（漲幅59%）</span><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 漲停前強力蓄力（波動率4.0%）</span><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 量能明顯放大（3.2倍）</span></td>
+            </tr>
+            <tr>
+                <td style="text-align:left;padding-left:10px;min-width:80px;"><a href='./charts/2026-10-30/1526.html' target='_blank'>1526 📊</a></td>
+                <td style="text-align:left;min-width:70px;color:#ccc;">日馳</td>
+                <td style="color:#ff4040;font-weight:bold;font-size:15px;min-width:60px;">15.85</td>
+                <td style="color:#aaa;font-size:12px;min-width:70px;">258</td>
+                <td style="min-width:65px;">
+                    <span style="background:#3d1a1a;color:#ff4040;font-weight:bold;padding:4px 8px;border-radius:4px;border:1px solid #ff4040;font-size:13px;">85%</span>
+                </td>
+                <td style="color:#ffd700;font-size:12px;min-width:110px;">15.25～15.55</td>
+                <td style="color:#ff9900;font-weight:bold;min-width:65px;">17.68</td>
+                <td style="color:#26a69a;min-width:100px;">14.9 <span style='color:#888;font-size:11px;'>(-6.0%)</span></td>
+                <td style="color:#ff8c00;min-width:60px;">21.16</td>
+                <td style="color:#ff6060;min-width:60px;">22.39</td>
+                <td style="color:#ff3030;font-weight:bold;min-width:60px;">24.4</td>
+                <td style="min-width:90px;">
+                    <span style="color:#26a69a;font-weight:bold;">56.2</span>
+                    <span style="color:#555;">/</span>
+                    <span style="color:#26a69a;">61.3</span>
+                    <br><span style="color:#26a69a;font-size:10px;">▼死叉</span>
+                </td>
+                <td style="text-align:left;min-width:300px;line-height:1.8;"><span style="color:#ffa500;margin-right:6px;font-size:11px;">⚠️ 季線走平或向下</span><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 窒息量縮（近3日均量僅漲停量25%）</span><span style="color:#666;margin-right:6px;font-size:11px;">📍 位階：股價為年線95%</span><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 整理天數理想（11天）</span><span style="color:#666;margin-right:6px;font-size:11px;">📍 大盤整理中</span><span style="color:#666;margin-right:6px;font-size:11px;">📍 第一波漲幅38%</span><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 漲停前強力蓄力（波動率2.3%）</span><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 量能爆發啟動（漲停量為前10日均量15.2倍）</span></td>
+            </tr>
+            <tr>
+                <td style="text-align:left;padding-left:10px;min-width:80px;"><a href='./charts/2026-10-30/3290.html' target='_blank'>3290 📊</a></td>
+                <td style="text-align:left;min-width:70px;color:#ccc;">東浦</td>
+                <td style="color:#ff4040;font-weight:bold;font-size:15px;min-width:60px;">49.8</td>
+                <td style="color:#aaa;font-size:12px;min-width:70px;">414</td>
+                <td style="min-width:65px;">
+                    <span style="background:#3d1a1a;color:#ff4040;font-weight:bold;padding:4px 8px;border-radius:4px;border:1px solid #ff4040;font-size:13px;">76%</span>
+                </td>
+                <td style="color:#ffd700;font-size:12px;min-width:110px;">47.22～48.18</td>
+                <td style="color:#ff9900;font-weight:bold;min-width:65px;">59.39</td>
+                <td style="color:#26a69a;min-width:100px;">51.3 <span style='color:#888;font-size:11px;'>(3.0%)</span></td>
+                <td style="color:#ff8c00;min-width:60px;">79.13</td>
+                <td style="color:#ff6060;min-width:60px;">84.91</td>
+                <td style="color:#ff3030;font-weight:bold;min-width:60px;">94.26</td>
+                <td style="min-width:90px;">
+                    <span style="color:#ff4040;font-weight:bold;">33.4</span>
+                    <span style="color:#555;">/</span>
+                    <span style="color:#ff4040;">23.2</span>
+                    <br><span style="color:#ff4040;font-size:10px;">▲金叉</span>
+                </td>
+                <td style="text-align:left;min-width:300px;line-height:1.8;"><span style="color:#ffa500;margin-right:6px;font-size:11px;">⚠️ 季線走平或向下</span><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 窒息量縮（近3日均量僅漲停量11%）</span><span style="color:#666;margin-right:6px;font-size:11px;">📍 位階：股價為年線102%</span><span style="color:#666;margin-right:6px;font-size:11px;">📍 KD K>D 上行中</span><span style="color:#666;margin-right:6px;font-size:11px;">📍 整理天數：22天</span><span style="color:#666;margin-right:6px;font-size:11px;">📍 大盤整理中</span><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 第一波強勁（漲幅54%）</span><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 漲停前低波動蓄力（波動率4.1%）</span><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 量能明顯放大（3.9倍）</span></td>
+            </tr>
+            <tr>
+                <td style="text-align:left;padding-left:10px;min-width:80px;"><a href='./charts/2026-10-30/3623.html' target='_blank'>3623 📊</a></td>
+                <td style="text-align:left;min-width:70px;color:#ccc;">富晶通</td>
+                <td style="color:#ff4040;font-weight:bold;font-size:15px;min-width:60px;">25.1</td>
+                <td style="color:#aaa;font-size:12px;min-width:70px;">251</td>
+                <td style="min-width:65px;">
+                    <span style="background:#3d1a1a;color:#ff4040;font-weight:bold;padding:4px 8px;border-radius:4px;border:1px solid #ff4040;font-size:13px;">75%</span>
+                </td>
+                <td style="color:#ffd700;font-size:12px;min-width:110px;">24.82～25.32</td>
+                <td style="color:#ff9900;font-weight:bold;min-width:65px;">31.51</td>
+                <td style="color:#26a69a;min-width:100px;">25.2 <span style='color:#888;font-size:11px;'>(0.4%)</span></td>
+                <td style="color:#ff8c00;min-width:60px;">34.85</td>
+                <td style="color:#ff6060;min-width:60px;">37.5</td>
+                <td style="color:#ff3030;font-weight:bold;min-width:60px;">41.8</td>
+                <td style="min-width:90px;">
+                    <span style="color:#26a69a;font-weight:bold;">13.1</span>
+                    <span style="color:#555;">/</span>
+                    <span style="color:#26a69a;">17.2</span>
+                    <br><span style="color:#26a69a;font-size:10px;">▼死叉</span>
+                </td>
+                <td style="text-align:left;min-width:300px;line-height:1.8;"><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 季線向上</span><span style="color:#ffa500;margin-right:6px;font-size:11px;">⚠️ 量未明顯縮（近3日均量53%）</span><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 位階理想（股價為年線105%）</span><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 整理天數理想（10天）</span><span style="color:#666;margin-right:6px;font-size:11px;">📍 大盤整理中</span><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 第一波強勁（漲幅58%）</span><span style="color:#666;margin-right:6px;font-size:11px;">📍 漲停前波動率7.3%</span><span style="color:#666;margin-right:6px;font-size:11px;">📍 量能啟動倍數1.9倍</span></td>
+            </tr>
+            <tr>
+                <td style="text-align:left;padding-left:10px;min-width:80px;"><a href='./charts/2026-10-30/3485.html' target='_blank'>3485 📊</a></td>
+                <td style="text-align:left;min-width:70px;color:#ccc;">敘豐</td>
+                <td style="color:#ff4040;font-weight:bold;font-size:15px;min-width:60px;">213.5</td>
+                <td style="color:#aaa;font-size:12px;min-width:70px;">132</td>
+                <td style="min-width:65px;">
+                    <span style="background:#3d1a1a;color:#ff4040;font-weight:bold;padding:4px 8px;border-radius:4px;border:1px solid #ff4040;font-size:13px;">73%</span>
+                </td>
+                <td style="color:#ffd700;font-size:12px;min-width:110px;">211.29～215.56</td>
+                <td style="color:#ff9900;font-weight:bold;min-width:65px;">270.68</td>
+                <td style="color:#26a69a;min-width:100px;">211.5 <span style='color:#888;font-size:11px;'>(-0.9%)</span></td>
+                <td style="color:#ff8c00;min-width:60px;">379.87</td>
+                <td style="color:#ff6060;min-width:60px;">414.86</td>
+                <td style="color:#ff3030;font-weight:bold;min-width:60px;">471.48</td>
+                <td style="min-width:90px;">
+                    <span style="color:#26a69a;font-weight:bold;">18.1</span>
+                    <span style="color:#555;">/</span>
+                    <span style="color:#26a69a;">27.7</span>
+                    <br><span style="color:#26a69a;font-size:10px;">▼死叉</span>
+                </td>
+                <td style="text-align:left;min-width:300px;line-height:1.8;"><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 季線向上</span><span style="color:#ffa500;margin-right:6px;font-size:11px;">⚠️ 量未明顯縮（近3日均量60%）</span><span style="color:#666;margin-right:6px;font-size:11px;">📍 位階：股價為年線104%</span><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 整理天數理想（9天）</span><span style="color:#666;margin-right:6px;font-size:11px;">📍 大盤整理中</span><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 第一波強勁（漲幅85%）</span><span style="color:#26a69a;margin-right:6px;font-size:11px;">✅ 漲停前低波動蓄力（波動率6.6%）</span><span style="color:#666;margin-right:6px;font-size:11px;">📍 量能啟動倍數0.8倍</span></td>
+            </tr></tbody>
+        </table></div>
+    <div class="footer">本系統僅供參考，不構成投資建議。投資有風險，操作須謹慎。</div>
+    </body></html>
